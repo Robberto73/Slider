@@ -27,14 +27,14 @@ import numpy as np
 # ═══════════════════════════════════════════════════════════
 SLIDE_WIDTH_PX = 1920
 SLIDE_HEIGHT_PX = 1080
-SOURCE_WIDTH_PX = 1280
-SOURCE_HEIGHT_PX = 720
+SOURCE_WIDTH_PX = 1920   # было 1280
+SOURCE_HEIGHT_PX = 1080  # было 720
 # ═══════════════════════════════════════════════════════════
 
 SLIDE_WIDTH = Inches(SLIDE_WIDTH_PX / 96)
 SLIDE_HEIGHT = Inches(SLIDE_HEIGHT_PX / 96)
-SCALE_X = SLIDE_WIDTH_PX / SOURCE_WIDTH_PX
-SCALE_Y = SLIDE_HEIGHT_PX / SOURCE_HEIGHT_PX
+SCALE_X = 1.0
+SCALE_Y = 1.0
 
 ICONS_BASE_DIR = None
 
@@ -628,7 +628,6 @@ class KimiPptdConverter:
         self._draw_fallback_icon(slide, x, y, w, h, icon_color, icon_name)
 
     def _draw_fallback_icon(self, slide, x, y, w, h, color, icon_name):
-        """Векторная заглушка если SVG не найден"""
         shape = slide.shapes.add_shape(
             MSO_SHAPE.OVAL,
             px_to_inches_x(x), px_to_inches_y(y),
@@ -638,7 +637,6 @@ class KimiPptdConverter:
         shape.fill.fore_color.rgb = RGBColor(*color)
         shape.line.fill.background()
 
-        # Текст с первыми буквами
         txBox = slide.shapes.add_textbox(
             px_to_inches_x(x), px_to_inches_y(y),
             px_to_inches_x(w), px_to_inches_y(h)
@@ -649,8 +647,11 @@ class KimiPptdConverter:
         p = tf.paragraphs[0]
         p.alignment = PP_ALIGN.CENTER
         run = p.add_run()
+        # Извлекаем первые буквы
         run.text = icon_name.replace("fas:", "").replace("ph:", "")[:2].upper()
-        run.font.size = Pt(min(w, h) * 0.4)
+        # Минимальный размер шрифта 8 pt, чтобы избежать ошибок
+        font_size = max(8, min(w, h) * 0.4)
+        run.font.size = Pt(font_size)
         run.font.color.rgb = RGBColor(255, 255, 255)
         run.font.bold = True
 

@@ -94,13 +94,15 @@ class IconLibrary:
     def get_best_variant(self, name: str, style: str = 'regular', prefer_flat: bool = False) -> Optional[IconVariant]:
         """
         Возвращает наилучший вариант по точному имени и стилю.
-        Если точного нет, пробует regular, затем любой.
+        Если стиль не указан или не найден – пробует regular, затем любой.
         """
         variants = self.search(name, style=style, flat=prefer_flat)
         if not variants and style != 'regular':
+            # Откат к regular
             variants = self.search(name, style='regular', flat=prefer_flat)
         if not variants:
-            variants = self.search(name)  # любой доступный
+            # Вообще любой стиль
+            variants = self.search(name)
         return variants[0] if variants else None
 
     def customize_svg(self, svg_path: Path, fill_color: Optional[str] = None,
@@ -145,3 +147,26 @@ class IconLibrary:
             for v in variants:
                 cats.setdefault(v.style, []).append(v.name)
         return cats
+
+class IconSemantics:
+    _mapping = {
+        "безопасность": ["shield", "shield-check", "lock-key", "fingerprint"],
+        "рост": ["trend-up", "chart-line-up", "arrow-up", "rocket"],
+        "инновации": ["atom", "cpu", "circuitry", "lightbulb-filament"],
+        "команда": ["users", "handshake", "user-circle-gear", "person-arms-spread"],
+        "деньги": ["currency-dollar", "bank", "wallet", "credit-card"],
+        "время": ["clock", "hourglass", "calendar", "timer"],
+        "связь": ["phone", "envelope", "chat-centered-text", "share-network"],
+        "геолокация": ["map-pin", "globe-hemisphere-west", "navigation-arrow", "compass"],
+    }
+
+    @classmethod
+    def get_icons(cls, keyword: str) -> list:
+        """Возвращает список подходящих иконок по ключевому слову."""
+        if keyword in cls._mapping:
+            return cls._mapping[keyword]
+        # ищем частичное совпадение по ключам
+        for k, v in cls._mapping.items():
+            if keyword in k or k in keyword:
+                return v
+        return []  # вернуть пустой, тогда модель использует общий поиск

@@ -13,6 +13,8 @@ from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import threading
+from fastapi import BackgroundTasks
 from pydantic import BaseModel
 
 from converter import KimiPptdConverter, convert_project_to_pptx
@@ -72,7 +74,7 @@ async def converter_page(request: Request):
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/api/generate")
-async def generate_presentation(request: PresentationRequest):
+async def generate_presentation(request: PresentationRequest, background_tasks: BackgroundTasks):
     project_id = f"proj_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     proj_dir = PROJECTS_DIR / project_id
     proj_dir.mkdir(exist_ok=True)
@@ -88,6 +90,8 @@ async def generate_presentation(request: PresentationRequest):
         "include_icons": request.include_icons,
         "model_type": request.model_type,
         "status": "generating",
+        "progress": 0,
+        "message": "Инициализация...",
         "created": datetime.now().isoformat(),
     }
     with open(proj_dir / "meta.json", 'w', encoding='utf-8') as f:
