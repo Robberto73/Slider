@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="nav-logo">◆</span>
+            <span class="nav-title">Kimi PPTD Agent</span>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link active">Генерация</a>
+            <a href="/converter" class="nav-link">Конвертер</a>
+        </div>
+    </nav>
+
+    <section class="hero">
+        <h1 class="hero-title">Создайте презентацию одной командой</h1>
+        <p class="hero-subtitle">Опишите тему — агент сгенерирует структуру, подберёт иконки и графики, а вы получите готовый PowerPoint.</p>
+    </section>
+
+    <main class="main-content">
+        <div class="card">
+            <div class="card-header">
+                <div class="card-icon">🎯</div>
+                <div>
+                    <h2 class="card-title">Новая презентация</h2>
+                    <p style="color:var(--text-muted); margin-top:4px;">Опишите тему — агент сделает всё остальное</p>
+                </div>
+            </div>
+
+            <form id="generateForm">
+                <div class="form-group">
+                    <label class="form-label">Тема презентации</label>
+                    <textarea name="topic" class="form-textarea"
+                        placeholder="Например: Исследование IP-геолокации и данных ФНС для выявления мульти-аккаунтов"
+                        rows="5" required></textarea>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Слайдов</label>
+                        <select name="slides_count" class="form-select">
+                            <option value="5">5</option>
+                            <option value="7" selected>7</option>
+                            <option value="10">10</option>
+                            <option value="15">15</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Стиль</label>
+                        <select name="style" class="form-select">
+                            <option value="dark" selected>Тёмный</option>
+                            <option value="light">Светлый</option>
+                            <option value="corporate">Корпоративный</option>
+                            <option value="minimal">Минимализм</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Язык</label>
+                        <select name="language" class="form-select">
+                            <option value="ru" selected>Русский</option>
+                            <option value="en">English</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Выбор модели -->
+                <div class="form-group">
+                    <label class="form-label">Модель генерации</label>
+                    <div style="display:flex; gap:24px; padding:8px 0;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="radio" name="model_type" value="local" checked>
+                            <span>🧪 Локальная LLM (OpenAI API)</span>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="radio" name="model_type" value="gigachat">
+                            <span>🤖 GigaChat</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="include_charts" checked class="checkbox-input">
+                            Графики и диаграммы
+                        </label>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="include_icons" checked class="checkbox-input">
+                            Иконки Phosphor
+                        </label>
+                    </div>
+                </div>
+
+                <div style="margin-top: 8px;">
+                    <button type="submit" class="btn btn-primary">
+                        <span class="btn-icon">🚀</span>
+                        Сгенерировать
+                    </button>
+                </div>
+            </form>
+
+            <div id="generationStatus" class="status-panel hidden">
+                <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+                <p class="status-text" id="statusText" style="margin-top:12px;">Инициализация...</p>
+                <div class="status-actions hidden" id="statusActions" style="margin-top:16px; display:flex; gap:12px;">
+                    <a href="#" id="downloadLink" class="btn btn-accent">⬇️ Скачать .pptx</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="templates-section">
+            <h3 class="card-title" style="margin-bottom:16px;">Быстрые шаблоны</h3>
+            <div class="templates-grid">
+                <button class="template-card" data-topic="Анализ рынка кибербезопасности и геолокации">
+                    <div class="template-icon">🛡️</div>
+                    <span>Кибербезопасность</span>
+                </button>
+                <button class="template-card" data-topic="Исследование мошеннических схем в финтехе">
+                    <div class="template-icon">💰</div>
+                    <span>Финтех фрод</span>
+                </button>
+                <button class="template-card" data-topic="GeoIP аналитика для AML систем">
+                    <div class="template-icon">🗺️</div>
+                    <span>AML GeoIP</span>
+                </button>
+                <button class="template-card" data-topic="Мульти-аккаунты: выявление и профилактика">
+                    <div class="template-icon">👥</div>
+                    <span>Мульти-аккаунты</span>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <footer class="footer">
+        Kimi PPTD Agent v2.0 | FullHD 1920×1080 | PowerPoint .pptx
+    </footer>
+
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

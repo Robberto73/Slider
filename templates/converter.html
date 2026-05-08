@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="nav-logo">◆</span>
+            <span class="nav-title">Kimi PPTD Agent</span>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link">Генерация</a>
+            <a href="/converter" class="nav-link active">Конвертер</a>
+        </div>
+    </nav>
+<!--
+    <section class="hero small">
+        <h1 class="hero-title">Конвертер PPTD → PPTX</h1>
+        <p class="hero-subtitle">Загрузите ZIP-архив с проектом Kimi и получите PowerPoint</p>
+    </section>
+-->
+    <main class="main-content">
+        <div class="card">
+            <div class="card-header">
+                <div class="card-icon">📦</div>
+                <h2 class="card-title">Загрузка архива</h2>
+            </div>
+
+            <div id="dropZone" class="drop-zone">
+                <div class="drop-icon">📁</div>
+                <p class="drop-text">Перетащите ZIP-архив сюда</p>
+                <p class="drop-hint">или нажмите для выбора файла</p>
+                <input type="file" id="fileInput" accept=".zip" class="file-input">
+            </div>
+
+            <div id="fileInfo" class="file-info hidden">
+                <div class="file-icon">📦</div>
+                <div class="file-details">
+                    <span class="file-name" id="fileName"></span>
+                    <span class="file-size" id="fileSize"></span>
+                </div>
+                <button class="file-remove" id="removeFile">✕</button>
+            </div>
+
+            <div id="convertProgress" class="progress-panel hidden">
+                <div class="progress-bar"><div class="progress-fill" id="convertProgressFill"></div></div>
+                <p class="progress-text" id="convertProgressText" style="margin-top:8px;">0%</p>
+            </div>
+
+            <div style="margin-top:20px;">
+                <button id="convertBtn" class="btn btn-primary" disabled>
+                    <span class="btn-icon">⚡</span>
+                    Конвертировать в PPTX
+                </button>
+            </div>
+
+            <div id="convertResult" class="result-panel hidden">
+                <div class="result-success">
+                    <span class="result-icon">✅</span>
+                    <span class="result-text">Конвертация завершена!</span>
+                </div>
+                <div style="display:flex; gap:12px; margin-top:12px;">
+                    <a href="#" id="downloadBtn" class="btn btn-accent">
+                        <span>⬇️</span> Скачать .pptx
+                    </a>
+                    <a href="#" id="previewBtn" class="btn btn-secondary">
+                        <span>👁️</span> Предпросмотр
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" style="background:#F9FAFB; border:1px solid var(--border);">
+            <h3 style="font-weight:600; margin-bottom:12px;">Ожидаемая структура ZIP-архива</h3>
+            <pre style="background:white; padding:16px; border-radius:8px; font-size:13px;">
+project.zip
+├── *.pptd
+├── pages/
+│   └── *.page
+└── images/ (опционально)
+            </pre>
+            <p style="color:var(--text-muted); margin-top:12px;">
+                Разрешение выхода: <strong>1920×1080 (FullHD)</strong><br>
+                Поддерживаются: иконки Phosphor SVG, графики matplotlib, таблицы, HTML-тексты
+            </p>
+        </div>
+    </main>
+
+    <footer class="footer">
+        Kimi PPTD Agent v2.0 | FullHD 1920×1080 | PowerPoint .pptx
+    </footer>
+
+    <script src="/static/js/converter.js"></script>
+</body>
+</html>
