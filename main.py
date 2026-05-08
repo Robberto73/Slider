@@ -97,7 +97,8 @@ async def generate_presentation(request: PresentationRequest):
         # Создаём агента
         agent = create_agent(
             request.model_type,
-            local_base_url=LOCAL_LLM_URL
+            local_base_url=LOCAL_LLM_URL,
+            icons_dir=ICONS_DIR
         )
 
         # Генерируем проект (.pptd и .page)
@@ -268,6 +269,29 @@ async def icon_categories():
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": "2.0"}
+
+
+@app.post("/api/improve-page/{project_id}/{page_name}")
+async def improve_page(project_id: str, page_name: str, instruction: str = Form(...)):
+    proj_dir = PROJECTS_DIR / project_id
+    if not proj_dir.exists():
+        raise HTTPException(404, "Проект не найден")
+
+    # Получаем агента с настройками по умолчанию (можно из конфига)
+    agent = create_agent(
+        DEFAULT_MODEL,
+        local_base_url=LOCAL_LLM_URL,
+        icons_dir=ICONS_DIR
+    )
+    try:
+        improved = agent.improve_page(proj_dir, page_name, instruction)
+        return JSONResponse({
+            "status": "success",
+            "message": f"Страница {page_name} улучшена",
+            "improved_yaml": improved
+        })
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
 
 
 if __name__ == "__main__":
