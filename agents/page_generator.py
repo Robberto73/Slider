@@ -7,6 +7,11 @@ from agents.base import BaseLLM
 from tools.icon_tool import IconTool
 from tools.chart_tool import ChartTool
 from tools.layout_tool import LayoutTool, SlideRole, Placeholder
+from tools.slide_validator import SlideValidator
+from tools.yaml_validator import YamlValidator
+import logging
+logger = logging.getLogger(__name__)
+
 
 class PageGenerator:
     def __init__(self, llm: BaseLLM, theme: Dict, icon_tool: Optional[IconTool] = None,
@@ -21,37 +26,63 @@ class PageGenerator:
     def generate(self, page_name: str, topic: str, style: str, language: str,
                  include_charts: bool, include_icons: bool, extra: str = "",
                  role: Optional[SlideRole] = None) -> Dict[str, Any]:
+        """Генерация слайда с циклом валидации и авто-исправлением"""
+
+
         self.current_topic = topic
         if role is None:
             role = LayoutTool.classify_role(page_name)
 
         placeholders = LayoutTool.get_placeholders(role)
         system = self._build_system_prompt(include_charts, include_icons, role, placeholders)
-        user = f"Страница: {page_name}. {extra} Тема: {topic}, стиль: {style}, язык: {language}."
+
+        # 🔄 Цикл генерации с валидацией
+        max_iter = 3
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user}
+            {"role": "user", "content": f"Страница: {page_name}. {extra}"}
         ]
 
-        # Один вызов модели, так как координаты основываются на плейсхолдерах
-        response = self.llm.chat(messages, temperature=0.5, max_tokens=2000)
-        yaml_str = self._extract_yaml(response)
+        for iteration in range(max_iter):
+            try:
+                # 🧠 Генерация кандидата
+                response = self.llm.chat(messages, temperature=0.4, max_tokens=2000)
+                yaml_str = self._extract_yaml(response)
+                page = yaml.safe_load(yaml_str)
+                if not isinstance(page, dict):
+                    raise ValueError("Не словарь")
+            except Exception as e:
+                # ❌ Ошибка парсинга — сразу фидбэк для перегенерации
+                if iteration < max_iter - 1:
+                    messages.append({"role": "user", "content": f"Ошибка YAML: {e}. Верни только валидный YAML."})
+                    continue
+                else:
+                    return self._fallback_page(role)
 
-        try:
-            page = yaml.safe_load(yaml_str)
-            if not isinstance(page, dict):
-                raise ValueError("Не словарь")
-        except Exception:
-            page = self._fallback_page(role)
+            # 🔧 Пост-обработка (ваш существующий функционал)
+            self._process_placeholders(page)
+            self._enforce_grid(page, placeholders)
+            self._normalize_icon_sizes(page)
+            self._fix_font_styles(page)
+            self._auto_fit_text(page)
+            page = YamlValidator.validate_and_fix(page, placeholders, self.theme)
 
-        # Постобработка: иконки/графики
-        self._process_placeholders(page)
-        # Удаляем элементы, выходящие за пределы разрешённых плейсхолдеров
-        self._enforce_grid(page, placeholders)
-        # Автоматическая корректировка: если иконка > 200px, уменьшаем
-        self._normalize_icon_sizes(page)
+            # 🔍 Валидация качества слайда
+            is_valid, errors = SlideValidator.validate(page)
+            if is_valid:
+                return page  # ✅ Успех — возвращаем валидный слайд
 
-        return page
+            # ❌ Ошибки — готовим фидбэк для следующей итерации
+            if iteration < max_iter - 1:
+                feedback = SlideValidator.format_errors_for_llm(errors)
+                messages.append({"role": "user", "content": feedback})
+            else:
+                # ⚠️ Последняя попытка не удалась — логгируем и возвращаем как есть
+                logger.warning(f"Слайд '{page_name}' имеет предупреждения после {max_iter} попыток: {errors}")
+                return page
+
+        # 🛡️ Fallback на всякий случай
+        return self._fallback_page(role)
 
     def _extract_yaml(self, text: str) -> str:
         match = re.search(r'```yaml\s*(.*?)\s*```', text, re.DOTALL)
@@ -135,6 +166,7 @@ elements:
     def _process_placeholders(self, page: Dict):
         for element in page.get("elements", []):
             etype = element.get("elementType")
+
             if etype == "icon" and "iconName" in element:
                 name = element["iconName"]
                 if isinstance(name, str) and name.startswith("<<ICON:") and name.endswith(">>"):
@@ -147,12 +179,12 @@ elements:
                         element["iconName"] = matched if matched else "circle"
                     else:
                         element["iconName"] = "circle"
-                if isinstance(element["iconName"], dict):
-                    # Пытаемся вытащить имя из словаря
-                    d = element["iconName"]
-                    element["iconName"] = d.get("name", d.get("iconName", "circle"))
-                elif not isinstance(element["iconName"], str):
-                    element["iconName"] = str(element["iconName"])
+                    if isinstance(element["iconName"], dict):
+                        d = element["iconName"]
+                        element["iconName"] = d.get("name", d.get("iconName", "circle"))
+                    elif not isinstance(element["iconName"], str):
+                        element["iconName"] = str(element["iconName"])
+
             elif etype == "chart" and "data" in element:
                 data = element["data"]
                 if isinstance(data, str) and data.startswith("<<CHART:") and data.endswith(">>"):
@@ -164,49 +196,57 @@ elements:
                         chart_data = self.chart_tool.generate(chart_type, self.current_topic, count)
                         element["type"] = chart_type
                         element["data"] = chart_data
+                        if "colors" not in element:
+                            element["colors"] = ["$accent", "$primary", "$textLight"]
                     else:
                         element["type"] = chart_type
                         element["data"] = [{"категория": f"Пример {i}", "значение": 10 * (i + 1)} for i in range(count)]
-                    if "colors" not in element:
-                        element["colors"] = ["$accent", "$primary", "$textLight"]
 
     def _enforce_grid(self, page: Dict, placeholders):
         allowed = []
+
         for el in page.get("elements", []):
             if "bounds" not in el:
                 continue
             x, y, w, h = el["bounds"]
-            contained = False
             for ph in placeholders:
-                px, py, pw, ph = ph.bounds
-                if x >= px and y >= py and x + w <= px + pw and y + h <= py + ph:
-                    contained = True
+                px, py, pw, ph_h = ph.bounds
+                if x >= px and y >= py and x + w <= px + pw and y + h <= py + ph_h:
+                    allowed.append(el)
                     break
-            if contained:
-                allowed.append(el)
-        page["elements"] = allowed  # <-- теперь после цикла
+        page["elements"] = allowed
 
     def _normalize_icon_sizes(self, page: Dict):
         for el in page.get("elements", []):
             if el.get("elementType") == "icon" and "bounds" in el:
-                w, h = el["bounds"][2], el["bounds"][3]
-                if w > 200 or h > 200:
-                    el["bounds"][2] = min(w, 200)
-                    el["bounds"][3] = min(h, 200)
+                if el["bounds"][2] > 200 or el["bounds"][3] > 200:
+                    el["bounds"][2] = min(el["bounds"][2], 200)
+                    el["bounds"][3] = min(el["bounds"][3], 200)
+
+    def _fix_font_styles(self, page: Dict):
+        for el in page.get("elements", []):
+            if el.get("elementType") == "text":
+                style = el.get("content", {}).get("style", "")
+                if style not in ["$title", "$subtitle", "$body", "$small"]:
+                    el["content"]["style"] = "$body"
+
+    def _auto_fit_text(self, page: Dict):
+        for el in page.get("elements", []):
+            if el.get("elementType") == "text":
+                text = el.get("content", {}).get("text", "")
+                bounds = el.get("bounds", [0, 0, 800, 600])
+                style = el.get("content", {}).get("style", "$body")
+
+                # Если текст длиннее 100 символов для title, уменьшить шрифт
+                if style == "$title" and len(text) > 100:
+                    el["content"]["style"] = "$subtitle"
 
     def _fallback_page(self, role: SlideRole) -> Dict:
         return {
             "background": {"type": "solid", "color": "$primary"},
             "elements": [
-                {
-                    "elementType": "text",
-                    "bounds": [200, 300, 1520, 200],
-                    "content": {
-                        "text": "⚠️ Ошибка генерации слайда",
-                        "style": "$title",
-                        "align": ["center", "middle"]
-                    }
-                }
+                {"elementType": "text", "bounds": [200, 300, 1520, 200],
+                 "content": {"text": "Слайд не сгенерирован", "style": "$title", "align": ["center", "middle"]}}
             ]
         }
 
@@ -214,6 +254,7 @@ elements:
                 role: Optional[SlideRole] = None) -> Dict[str, Any]:
         if role is None:
             role = LayoutTool.classify_role(page_name)
+
         extra = f"Улучши существующий слайд: {instruction}. Текущий YAML: {current_yaml}"
         return self.generate(page_name, self.current_topic, "dark", "ru",
                              include_charts=True, include_icons=True,
