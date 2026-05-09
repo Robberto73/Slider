@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Kimi .pptd → PowerPoint .pptx конвертер (FullHD 1920x1080)
-С поддержкой SVG иконок Phosphor через EMF/PNG конвертацию.
+С поддержкой рендеринга иконок Phosphor в PNG через IconRenderer.
 """
 
 import yaml
@@ -16,8 +16,9 @@ from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 from lxml import etree
 import re
-
+from tools.icon_renderer import IconRenderer
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,14 +28,13 @@ import numpy as np
 # ═══════════════════════════════════════════════════════════
 SLIDE_WIDTH_PX = 1920
 SLIDE_HEIGHT_PX = 1080
-SOURCE_WIDTH_PX = 1920   # было 1280
-SOURCE_HEIGHT_PX = 1080  # было 720
-# ═══════════════════════════════════════════════════════════
+SOURCE_WIDTH_PX = 1920
+SOURCE_HEIGHT_PX = 1080
+SCALE_X = 1.0
+SCALE_Y = 1.0
 
 SLIDE_WIDTH = Inches(SLIDE_WIDTH_PX / 96)
 SLIDE_HEIGHT = Inches(SLIDE_HEIGHT_PX / 96)
-SCALE_X = 1.0
-SCALE_Y = 1.0
 
 ICONS_BASE_DIR = None
 
@@ -45,90 +45,6 @@ def px_to_inches_x(px):
 
 def px_to_inches_y(py):
     return Inches((py * SCALE_Y) / 96)
-
-
-# ═══════════════════════════════════════════════════════════
-# SVG → EMF/PNG конвертация
-# ═══════════════════════════════════════════════════════════
-
-def svg_to_emf(svg_path, emf_path):
-    """Конвертирует SVG в EMF через Inkscape или cairosvg"""
-    svg_path = Path(svg_path)
-    emf_path = Path(emf_path)
-
-    # Пробуем Inkscape (лучшее качество вектора)
-    try:
-        subprocess.run([
-            "inkscape", str(svg_path),
-            "--export-type=emf",
-            "--export-filename", str(emf_path)
-        ], check=True, capture_output=True, timeout=30)
-        return emf_path
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-
-    # Пробуем cairosvg
-    try:
-        import cairosvg
-        cairosvg.svg2emf(url=str(svg_path), write_to=str(emf_path))
-        return emf_path
-    except (ImportError, Exception):
-        pass
-
-    # Fallback: SVG → PNG
-    try:
-        import cairosvg
-        png_path = emf_path.with_suffix('.png')
-        cairosvg.svg2png(
-            url=str(svg_path), 
-            write_to=str(png_path), 
-            output_width=256, 
-            output_height=256
-        )
-        return png_path
-    except Exception:
-        return None
-
-
-def find_icon_svg(icon_name, icons_dir):
-    """Ищет SVG файл иконки по имени с множественными вариантами"""
-    if not icons_dir or not icons_dir.exists():
-        return None
-
-    # Нормализуем имя
-    icon_base = icon_name.replace("fas:", "").replace("ph:", "").replace("-", "_").replace(" ", "_")
-
-    variants = [
-        f"{icon_base}.svg",
-        f"{icon_base.lower()}.svg",
-        f"{icon_base.upper()}.svg",
-        f"{icon_base.replace('_', '-')}.svg",
-        f"{icon_base.replace('_', ' ')}.svg",
-    ]
-
-    # Сначала ищем в корне
-    for variant in variants:
-        svg_path = icons_dir / variant
-        if svg_path.exists():
-            return svg_path
-
-    # Потом в подпапках (weight variants)
-    for subdir in ["regular", "bold", "thin", "light", "fill", "duotone", "SVGs", "SVGs Flat"]:
-        search_dir = icons_dir / subdir if subdir else icons_dir
-        if not search_dir.exists():
-            continue
-        for variant in variants:
-            svg_path = search_dir / variant
-            if svg_path.exists():
-                return svg_path
-
-    # Поиск по части имени (fuzzy)
-    icon_base_lower = icon_base.lower()
-    for svg_file in icons_dir.rglob("*.svg"):
-        if icon_base_lower in svg_file.stem.lower():
-            return svg_file
-
-    return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -165,7 +81,7 @@ def generate_chart(chart_data, chart_type, colors, width=600, height=300, dpi=15
 
     # Проверяем, есть ли осмысленные данные
     if all(v == 0 for v in values) and chart_type != 'pie':
-        return None  # не рисуем пустой график
+        return None
     if sum(values) == 0 and chart_type == 'pie':
         return None
 
@@ -245,6 +161,11 @@ class KimiPptdConverter:
         self.pages_dir = None
         self.icons_dir = icons_base_dir
         self._icon_cache = {}
+        # Новый рендерер иконок
+        self.icon_renderer = None
+        if icons_base_dir and Path(icons_base_dir).exists():
+            from tools.icon_renderer import IconRenderer
+            self.icon_renderer = IconRenderer(Path(icons_base_dir))
 
     def load_project(self, project_dir):
         project_dir = Path(project_dir)
@@ -263,14 +184,6 @@ class KimiPptdConverter:
         self.pages_dir = project_dir / "pages"
         self.images_dir = project_dir / "images"
 
-        # Ищем иконки
-        if not self.icons_dir:
-            local_icons = project_dir / "icons" / "SVGs"
-            if local_icons.exists():
-                self.icons_dir = local_icons
-            elif ICONS_BASE_DIR and Path(ICONS_BASE_DIR).exists():
-                self.icons_dir = Path(ICONS_BASE_DIR)
-
         return pptd.get("pages", [])
 
     def resolve_color(self, val):
@@ -280,7 +193,7 @@ class KimiPptdConverter:
 
     def hex_to_rgb(self, hex_color):
         hex_color = hex_color.lstrip("#")
-        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
     def strip_html_tags(self, text_str):
         if not text_str:
@@ -497,33 +410,21 @@ class KimiPptdConverter:
                 p.line_spacing = line_height
 
     def _add_image(self, slide, el, x, y, w, h):
-        """Только локальные изображения из папки images/ проекта"""
         img_name = el.get("image", "")
         src = el.get("src", "")
 
         img_path = None
 
-        # Приоритет: локальный файл из images/
         if img_name:
             local_path = self.images_dir / img_name
             if local_path.exists():
                 img_path = local_path
-
-        # Если нет image, но есть src — ищем по имени файла из URL
         elif src:
             url_name = src.split("/")[-1].split("?")[0]
             if url_name:
-                # Прямое совпадение
                 local_path = self.images_dir / url_name
                 if local_path.exists():
                     img_path = local_path
-
-                # Поиск по части имени
-                if not img_path or not img_path.exists():
-                    for f in self.images_dir.iterdir():
-                        if f.is_file() and url_name[:10] in f.name:
-                            img_path = f
-                            break
 
         if img_path and img_path.exists():
             try:
@@ -584,48 +485,35 @@ class KimiPptdConverter:
                         run.font.name = style.get("fontFamily", "Arial")
 
     def _add_icon(self, slide, el, x, y, w, h):
-        """Иконки через SVG → EMF/PNG конвертацию"""
+        """Вставляет иконку как PNG с прозрачностью, используя IconRenderer."""
         icon_name = el.get("iconName", "")
         fill_cfg = el.get("fill", {})
+        icon_color = self.resolve_color(fill_cfg.get("color", "$accent"))
+        style = el.get("style", "regular")
+        decorative = el.get("decorativeShape")
+        shape_color = self.resolve_color(el.get("shapeColor", "$accent")) if decorative else None
 
-        # Определяем цвет иконки
-        icon_color = (201, 137, 46)  # accent по умолчанию
-        if fill_cfg.get("type") == "solid":
-            resolved = self.resolve_color(fill_cfg.get("color", "$accent"))
-            icon_color = self.hex_to_rgb(resolved)
+        if self.icon_renderer:
+            try:
+                png_path = self.icon_renderer.render(
+                    icon_name=icon_name,
+                    size=max(w, h),
+                    fill_color=icon_color,
+                    style=style,
+                    decorative_shape=decorative,
+                    shape_color=shape_color,
+                )
+                slide.shapes.add_picture(
+                    str(png_path),
+                    px_to_inches_x(x), px_to_inches_y(y),
+                    px_to_inches_x(w), px_to_inches_y(h)
+                )
+                return
+            except Exception as e:
+                print(f"⚠ Ошибка рендеринга иконки {icon_name}: {e}")
 
-        # Пробуем найти SVG и конвертировать
-        if self.icons_dir:
-            svg_path = find_icon_svg(icon_name, self.icons_dir)
-            if svg_path:
-                cache_key = f"{svg_path.stem}_{icon_color}"
-                if cache_key in self._icon_cache:
-                    emf_path = self._icon_cache[cache_key]
-                else:
-                    tmp_dir = Path(tempfile.gettempdir()) / "kimi_icons"
-                    tmp_dir.mkdir(exist_ok=True)
-                    emf_path = tmp_dir / f"{cache_key}.emf"
-
-                    if not emf_path.exists():
-                        result = svg_to_emf(svg_path, emf_path)
-                        if result:
-                            emf_path = result
-
-                    self._icon_cache[cache_key] = emf_path
-
-                if emf_path and emf_path.exists():
-                    try:
-                        slide.shapes.add_picture(
-                            str(emf_path),
-                            px_to_inches_x(x), px_to_inches_y(y),
-                            px_to_inches_x(w), px_to_inches_y(h)
-                        )
-                        return
-                    except Exception as e:
-                        print(f"⚠ Ошибка вставки иконки {icon_name}: {e}")
-
-        # Fallback — векторная заглушка
-        self._draw_fallback_icon(slide, x, y, w, h, icon_color, icon_name)
+        # Fallback — круг с буквами
+        self._draw_fallback_icon(slide, x, y, w, h, self.hex_to_rgb(icon_color), icon_name)
 
     def _draw_fallback_icon(self, slide, x, y, w, h, color, icon_name):
         shape = slide.shapes.add_shape(
@@ -647,16 +535,13 @@ class KimiPptdConverter:
         p = tf.paragraphs[0]
         p.alignment = PP_ALIGN.CENTER
         run = p.add_run()
-        # Извлекаем первые буквы
         run.text = icon_name.replace("fas:", "").replace("ph:", "")[:2].upper()
-        # Минимальный размер шрифта 8 pt, чтобы избежать ошибок
         font_size = max(8, min(w, h) * 0.4)
         run.font.size = Pt(font_size)
         run.font.color.rgb = RGBColor(255, 255, 255)
         run.font.bold = True
 
     def _add_chart(self, slide, el, x, y, w, h):
-        """Реальные графики через matplotlib"""
         chart_type = el.get("type", "bar")
         data = el.get("data", [])
         colors_cfg = el.get("colors", ["$accent"])
@@ -722,7 +607,6 @@ class KimiPptdConverter:
 
 
 def convert_project_to_pptx(zip_path, output_path=None, progress_callback=None, icons_base_dir=None):
-    """Конвертирует ZIP-архив в PPTX"""
     zip_path = Path(zip_path)
     if output_path is None:
         output_path = zip_path.with_suffix(".pptx")
