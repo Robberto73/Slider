@@ -1,17 +1,14 @@
 # agents/page_generator.py
 import yaml
+import json
 import re
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from agents.base import BaseLLM
 from tools.icon_tool import IconTool
 from tools.chart_tool import ChartTool
 from tools.layout_tool import LayoutTool, SlideRole, Placeholder
-from tools.slide_validator import SlideValidator
 from tools.yaml_validator import YamlValidator
-import logging
-logger = logging.getLogger(__name__)
-
 
 class PageGenerator:
     def __init__(self, llm: BaseLLM, theme: Dict, icon_tool: Optional[IconTool] = None,
@@ -26,63 +23,88 @@ class PageGenerator:
     def generate(self, page_name: str, topic: str, style: str, language: str,
                  include_charts: bool, include_icons: bool, extra: str = "",
                  role: Optional[SlideRole] = None) -> Dict[str, Any]:
-        """Генерация слайда с циклом валидации и авто-исправлением"""
-
-
         self.current_topic = topic
         if role is None:
             role = LayoutTool.classify_role(page_name)
 
         placeholders = LayoutTool.get_placeholders(role)
         system = self._build_system_prompt(include_charts, include_icons, role, placeholders)
-
-        # 🔄 Цикл генерации с валидацией
-        max_iter = 3
+        user = f"Страница: {page_name}. {extra}"
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": f"Страница: {page_name}. {extra}"}
+            {"role": "user", "content": user}
         ]
 
-        for iteration in range(max_iter):
+        # Максимум 3 попытки генерации с самооценкой
+        best_page = None
+        best_score = 0
+        for attempt in range(3):
+            if attempt > 0:
+                # Передаём замечания и просим исправить
+                critique = self._get_critique(best_page, role)
+                messages.append({"role": "user", "content": f"Предыдущая версия имеет недостатки: {critique}. Исправь YAML."})
+
+            response = self.llm.chat(messages, temperature=0.4, max_tokens=2000)
+            messages.append({"role": "assistant", "content": response})
+
+            yaml_str = self._extract_yaml(response)
             try:
-                # 🧠 Генерация кандидата
-                response = self.llm.chat(messages, temperature=0.4, max_tokens=2000)
-                yaml_str = self._extract_yaml(response)
                 page = yaml.safe_load(yaml_str)
                 if not isinstance(page, dict):
-                    raise ValueError("Не словарь")
-            except Exception as e:
-                # ❌ Ошибка парсинга — сразу фидбэк для перегенерации
-                if iteration < max_iter - 1:
-                    messages.append({"role": "user", "content": f"Ошибка YAML: {e}. Верни только валидный YAML."})
                     continue
-                else:
-                    return self._fallback_page(role)
+            except Exception:
+                continue
 
-            # 🔧 Пост-обработка (ваш существующий функционал)
             self._process_placeholders(page)
             self._enforce_grid(page, placeholders)
-            self._normalize_icon_sizes(page)
-            self._fix_font_styles(page)
-            self._auto_fit_text(page)
             page = YamlValidator.validate_and_fix(page, placeholders, self.theme)
 
-            # 🔍 Валидация качества слайда
-            is_valid, errors = SlideValidator.validate(page)
-            if is_valid:
-                return page  # ✅ Успех — возвращаем валидный слайд
-
-            # ❌ Ошибки — готовим фидбэк для следующей итерации
-            if iteration < max_iter - 1:
-                feedback = SlideValidator.format_errors_for_llm(errors)
-                messages.append({"role": "user", "content": feedback})
-            else:
-                # ⚠️ Последняя попытка не удалась — логгируем и возвращаем как есть
-                logger.warning(f"Слайд '{page_name}' имеет предупреждения после {max_iter} попыток: {errors}")
+            # Оценка качества
+            score = self._evaluate_page(page, role)
+            if score >= 8:  # отлично, сразу возвращаем
                 return page
+            if score > best_score:
+                best_score = score
+                best_page = page
+            # иначе продолжаем цикл с замечаниями
 
-        # 🛡️ Fallback на всякий случай
-        return self._fallback_page(role)
+        return best_page if best_page else self._fallback_page(role)
+
+    def _evaluate_page(self, page: Dict, role: SlideRole) -> int:
+        """Быстрый оценочный промпт: возвращает число от 1 до 10."""
+        yaml_dump = yaml.dump(page, allow_unicode=True)
+        prompt = (
+            f"Оцени качество слайда по шкале 1-10. Слайд роли {role.value}. "
+            f"Содержимое YAML:\n{yaml_dump}\n\n"
+            "Критерии:\n"
+            "- Заполненность контентом (нет пустых блоков)\n"
+            "- Иконки адекватного размера (не гигантские)\n"
+            "- Текст читаем и не выходит за границы\n"
+            "- Соответствует своей роли\n"
+            "Укажи только число (1-10)."
+        )
+        try:
+            resp = self.llm.chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=10)
+            # Извлекаем число
+            match = re.search(r'\b(10|[1-9])\b', resp)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+        return 5  # средняя оценка при ошибке
+
+    def _get_critique(self, page: Dict, role: SlideRole) -> str:
+        """Возвращает краткие замечания по слайду."""
+        yaml_dump = yaml.dump(page, allow_unicode=True)
+        prompt = (
+            f"Слайд роли {role.value} имеет следующие недостатки. YAML:\n{yaml_dump}\n\n"
+            "Напиши кратко (2-3 предложения), что нужно исправить, чтобы улучшить слайд."
+        )
+        try:
+            resp = self.llm.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=150)
+            return resp.strip()
+        except Exception:
+            return "Улучши читаемость и компоновку."
 
     def _extract_yaml(self, text: str) -> str:
         match = re.search(r'```yaml\s*(.*?)\s*```', text, re.DOTALL)
@@ -96,29 +118,25 @@ class PageGenerator:
     def _build_system_prompt(self, include_charts, include_icons, role: SlideRole, placeholders):
         colors = self.theme.get("colors", {})
         color_desc = "\n".join([f"    {k}: \"{v}\"" for k, v in colors.items()])
-        text_styles = self.theme.get("textStyles", {})
-        styles_desc = "\n".join([
-            f"    {k}: {{ fontSize: {v.get('fontSize', 18)}, fontFamily: {v.get('fontFamily', 'Inter')}, color: \"{v.get('color', '$textDark')}\" }}"
-            for k, v in text_styles.items()
-        ])
-
         placeholder_desc = LayoutTool.describe_placeholders(placeholders)
 
-        prompt = f"""Ты — дизайнер слайда. Слайд имеет роль **{role.value}**.
-Вот разрешённые плейсхолдеры (координаты жёстко заданы):
+        prompt = f"""Ты — профессиональный дизайнер слайдов. Размести контент в заданной сетке.
+
+СЕТКА СЛАЙДА (роль: {role.value}):
 {placeholder_desc}
 
-Ты можешь размещать в этих плейсхолдерах любые элементы (text, shape, icon, chart), **но не выходить за их границы**. Допускается создавать составные блоки внутри плейсхолдеров (например, прямоугольник с заливкой + текст поверх).
+ДОСТУПНЫЕ ЦВЕТА:
+{color_desc}
 
-Обязательные правила по оформлению:
-1. Иконки должны быть **маленькими** (не более 200×200 пикселей). Используй их как маркеры списков или акценты рядом с текстом. Пример: bounds: [120, 250, 80, 80].
-2. Для выделения важных блоков используй **shape** (rect, roundedRect) с цветной заливкой из темы, а поверх него размещай text.
-3. Все тексты должны использовать стили из темы: $title, $subtitle, $body, $small.
-4. Не размещай элементы вплотную друг к другу — оставляй отступы минимум 20px между ними.
-5. Избегай слишком крупных блоков текста, разбивай на абзацы.
-6. Если есть свободное место, добавь небольшой декоративный элемент (иконку или небольшой shape), но не загромождай слайд.
+ПРАВИЛА:
+1. Заголовок — ОДНА строка, стиль $title (fontSize 36).
+2. Основной текст — стиль $body (fontSize 20). Каждый параграф ≤ 4 строк.
+3. Иконки-маркеры для списков СТРОГО 40x40 px. Декоративные иконки ≤ 200x200 px.
+4. Не меняй bounds плейсхолдеров, не выходи за границы.
+5. Между элементами отступ минимум 20 px.
+6. Не обрамляй iconName в кавычки внутри YAML.
 
-Пример хорошего слайда (роль title_and_content):
+ПРИМЕР ИДЕАЛЬНОГО СЛАЙДА (content_with_icons):
 ```yaml
 background:
   type: solid
@@ -127,35 +145,23 @@ elements:
   - elementType: text
     bounds: [120, 80, 1680, 120]
     content:
-      text: "<b>Основные выводы</b>"
+      text: "Предпосылки и проблематика"
       style: "$title"
-      align: [center, middle]
-  - elementType: shape
-    bounds: [120, 240, 1680, 600]
-    shapeName: roundedRect
-    fill:
-      type: solid
-      color: "$primary"
+      align: [left, middle]
   - elementType: text
-    bounds: [160, 280, 800, 180]
+    bounds: [120, 300, 800, 550]
     content:
-      text: "<i>Рынок вырос на 30%</i>\nОблачные сервисы и IoT стали драйверами роста."
+      text: "<b>Географические аномалии</b>\\n\\nПользователи из разных регионов...\\n\\n<b>Несоответствие ИНН и IP</b>\\n\\nРегион регистрации не совпадает..."
       style: "$body"
       align: [left, top]
   - elementType: icon
-    bounds: [1000, 280, 80, 80]
-    iconName: "<<ICON:рост|bold>>"
-  - elementType: text
-    bounds: [160, 480, 800, 180]
-    content:
-      text: "Основные угрозы: фишинг, программы-вымогатели, DDoS."
-      style: "$body"
-      align: [left, top]
+    bounds: [120, 300, 40, 40]
+    iconName: <<ICON:map-pin|regular>>
   - elementType: icon
-    bounds: [1000, 480, 80, 80]
-    iconName: "<<ICON:опасность|regular>>"
+    bounds: [120, 450, 40, 40]
+    iconName: <<ICON:identification-badge|regular>>
 ```
-Теперь создай слайд для страницы, запрошенной пользователем.
+Создай слайд.
 """
         if not include_charts:
             prompt += "\nГрафики отключены. Не используй chart и <<CHART>>."
