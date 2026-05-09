@@ -15,7 +15,7 @@ class OrchestratorAgent(PresentationAgent):
     def __init__(self, llm: BaseLLM, icons_dir: Path = None):
         self.llm = llm
         self.icon_tool = IconTool(icons_dir) if icons_dir else None
-        self.chart_tool = ChartTool(llm=self.llm)  # для имён категорий
+        self.chart_tool = ChartTool(llm=self.llm)
         self.improver_tool = PageImproverTool(llm)
 
     def generate(self, topic, slides_count, style, language,
@@ -36,16 +36,15 @@ class OrchestratorAgent(PresentationAgent):
             if progress_callback:
                 progress_callback(pct, f"Генерация слайда {i+1} из {len(pages)}: {page_name}")
 
-            # Определяем роль слайда по имени
             role: SlideRole = LayoutTool.classify_role(page_name)
-            # Формируем контекст с ролью и уникальным требованием
+            # Передаём полный текст запроса как контекст
             extra = (
                 f"Страница {i+1} из {len(pages)}. "
-                f"Роль слайда: {role.value}. "
+                f"Роль: {role.value}. "
                 f"Тема: {topic}. "
-                f"Стиль оформления: {style}. "
-                f"Язык: {language}. "
-                f"Создай уникальное содержимое, не повторяй заголовки других слайдов."
+                f"Стиль: {style}. Язык: {language}. "
+                f"Исходный запрос пользователя:\n{topic}\n\n"
+                f"Твоя задача — разместить контент, строго соответствующий описанию этой страницы."
             )
             content = gen.generate(page_name, topic, style, language,
                                    include_charts, include_icons, extra, role)
@@ -63,15 +62,17 @@ class OrchestratorAgent(PresentationAgent):
                      include_charts, include_icons):
         system = "Ты — планировщик презентаций. Отвечай строго JSON без ```json."
         user = (
-            f'Тема: "{topic}". Слайдов: {slides_count}, '
-            f"стиль: {style}, язык: {language}.\n"
-            f"Графики: {'да' if include_charts else 'нет'}, "
-            f"Иконки: {'да' if include_icons else 'нет'}.\n"
-            "Самостоятельно подбери цвета для темы, соответствующие стилю "
-            f"«{style}» (например, для светлого — светлый фон, тёмный "
-            "текст; для тёмного — тёмный фон, светлый текст).\n"
-            "Верни JSON строго в формате:\n"
-            "{\n"
+            f'Полный запрос пользователя:\n{topic}\n\n'
+            f'Количество слайдов: {slides_count}, стиль: {style}, язык: {language}.\n'
+            f'Графики: {"да" if include_charts else "нет"}, '
+            f'Иконки: {"да" if include_icons else "нет"}.\n'
+            'На основе запроса пользователя составь структуру презентации. '
+            'Каждый слайд должен соответствовать отдельному пункту/разделу запроса. '
+            'Имена слайдов должны отражать их содержание (на английском, оканчиваются на .page). '
+            'Если в запросе явно указано содержание слайдов, соблюдай его.\n'
+            'Самостоятельно подбери цвета для темы, соответствующие стилю.\n'
+            'Верни JSON строго в формате:\n'
+            '{\n'
             '  "theme": {\n'
             '    "colors": {\n'
             '      "primary": "#hex",\n'
@@ -79,23 +80,22 @@ class OrchestratorAgent(PresentationAgent):
             '      "bgLight": "#hex",\n'
             '      "textDark": "#hex",\n'
             '      "textLight": "#hex"\n'
-            "    },\n"
+            '    },\n'
             '    "textStyles": {\n'
             '      "title": { "fontSize": 36, "fontFamily": "Inter", "color": "$textLight" },\n'
             '      "subtitle": { "fontSize": 28, "fontFamily": "Inter", "color": "$textLight" },\n'
             '      "body": { "fontSize": 20, "fontFamily": "Inter", "color": "$textDark" },\n'
             '      "small": { "fontSize": 12, "fontFamily": "Inter", "color": "$textDark" }\n'
-            "    }\n"
-            "  },\n"
+            '    }\n'
+            '  },\n'
             f'  "pages": ["cover.page", ...]  // ровно {slides_count} имён\n'
-            "}\n"
-            "Ответ только JSON без каких-либо дополнительных символов."
+            '}\n'
+            'Ответ только JSON без каких-либо дополнительных символов.'
         )
         resp = self.llm.chat([{"role": "system", "content": system},
                                {"role": "user", "content": user}],
                               temperature=0.2, max_tokens=800)
 
-        # Разбор JSON (устойчивый)
         json_str = resp.strip()
         if json_str.startswith("```json"):
             json_str = json_str[7:]
@@ -114,7 +114,6 @@ class OrchestratorAgent(PresentationAgent):
             print(f"Ошибка парсинга JSON плана: {e}\nОтвет модели:\n{resp}")
             raise ValueError("План не является валидным JSON")
 
-        # Контроль количества страниц
         planned_pages = plan.get("pages", [])
         if len(planned_pages) != slides_count:
             if len(planned_pages) < slides_count:

@@ -29,6 +29,7 @@ class IconRenderer:
         shape_color: Optional[str] = None,
         output_dir: Optional[Path] = None,
     ) -> Path:
+        icon_name = str(icon_name)
         cache_key = (icon_name, size, fill_color, style, decorative_shape, shape_color)
         if cache_key in self.cache:
             cached_path = self.cache[cache_key]

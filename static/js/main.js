@@ -1,3 +1,4 @@
+// static/js/main.js
 document.addEventListener('DOMContentLoaded', () => {
     const form = document.getElementById('generateForm');
     const statusPanel = document.getElementById('generationStatus');
@@ -6,9 +7,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusActions = document.getElementById('statusActions');
     const downloadLink = document.getElementById('downloadLink');
 
+    // Валидация количества слайдов
+    const slidesInput = document.querySelector('[name="slides_count"]');
+    slidesInput.addEventListener('input', () => {
+        let val = parseInt(slidesInput.value, 10);
+        if (isNaN(val) || val < 1) slidesInput.value = 1;
+        if (val > 30) slidesInput.value = 30;
+    });
+
+    // Быстрые шаблоны
     document.querySelectorAll('.template-card').forEach(card => {
         card.addEventListener('click', () => {
-            document.querySelector('[name="topic"]').value = card.dataset.topic;
+            const topic = card.dataset.topic;
+            document.querySelector('[name="topic"]').value = topic;
             document.querySelectorAll('.template-card').forEach(c => c.style.borderColor = '');
             card.style.borderColor = 'var(--accent)';
         });

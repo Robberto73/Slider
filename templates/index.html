@@ -21,7 +21,7 @@
 
     <section class="hero">
         <h1 class="hero-title">Создайте презентацию одной командой</h1>
-        <p class="hero-subtitle">Опишите тему — агент сгенерирует структуру, подберёт иконки и графики, а вы получите готовый PowerPoint.</p>
+        <p class="hero-subtitle">Опишите тему — агент GigaChat сгенерирует структуру, подберёт иконки и графики, а вы получите готовый PowerPoint.</p>
     </section>
 
     <main class="main-content">
@@ -44,13 +44,8 @@
 
                 <div class="form-row">
                     <div class="form-group">
-                        <label class="form-label">Слайдов</label>
-                        <select name="slides_count" class="form-select">
-                            <option value="5">5</option>
-                            <option value="7" selected>7</option>
-                            <option value="10">10</option>
-                            <option value="15">15</option>
-                        </select>
+                        <label class="form-label">Количество слайдов (от 1 до 30)</label>
+                        <input type="number" name="slides_count" class="form-textarea" min="1" max="30" value="7" required>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Стиль</label>
@@ -70,7 +65,6 @@
                     </div>
                 </div>
 
-                <!-- Выбор модели -->
                 <div class="form-group">
                     <label class="form-label">Модель генерации</label>
                     <div style="display:flex; gap:24px; padding:8px 0;">

@@ -484,9 +484,14 @@ class KimiPptdConverter:
                         run.font.size = Pt(style.get("fontSize", 16))
                         run.font.name = style.get("fontFamily", "Arial")
 
+
     def _add_icon(self, slide, el, x, y, w, h):
         """Вставляет иконку как PNG с прозрачностью, используя IconRenderer."""
         icon_name = el.get("iconName", "")
+        if isinstance(icon_name, dict):
+            icon_name = icon_name.get("name", "circle")
+        elif not isinstance(icon_name, str):
+            icon_name = str(icon_name)
         fill_cfg = el.get("fill", {})
         icon_color = self.resolve_color(fill_cfg.get("color", "$accent"))
         style = el.get("style", "regular")

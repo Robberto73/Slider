@@ -33,7 +33,7 @@ class PageGenerator:
             {"role": "user", "content": user}
         ]
 
-        # Модель отвечает один раз, так как координаты фиксированы
+        # Один вызов модели, так как координаты основываются на плейсхолдерах
         response = self.llm.chat(messages, temperature=0.5, max_tokens=2000)
         yaml_str = self._extract_yaml(response)
 
@@ -42,26 +42,14 @@ class PageGenerator:
             if not isinstance(page, dict):
                 raise ValueError("Не словарь")
         except Exception:
-            # fallback – пустая страница с плейсхолдерами
-            page = {
-                "background": {"type": "solid", "color": "$primary"},
-                "elements": [
-                    {
-                        "elementType": "text",
-                        "bounds": [200, 300, 1520, 200],
-                        "content": {
-                            "text": "⚠️ Ошибка генерации слайда",
-                            "style": "$title",
-                            "align": ["center", "middle"]
-                        }
-                    }
-                ]
-            }
+            page = self._fallback_page(role)
 
-        # Постобработка плейсхолдеров
+        # Постобработка: иконки/графики
         self._process_placeholders(page)
-        # Фильтрация: оставляем только элементы, разрешённые сеткой
+        # Удаляем элементы, выходящие за пределы разрешённых плейсхолдеров
         self._enforce_grid(page, placeholders)
+        # Автоматическая корректировка: если иконка > 200px, уменьшаем
+        self._normalize_icon_sizes(page)
 
         return page
 
@@ -85,46 +73,58 @@ class PageGenerator:
 
         placeholder_desc = LayoutTool.describe_placeholders(placeholders)
 
-        prompt = f"""Ты — генератор контента слайда. Слайд имеет роль **{role.value}**. Используй СТРОГО следующую сетку:
-
+        prompt = f"""Ты — дизайнер слайда. Слайд имеет роль **{role.value}**.
+Вот разрешённые плейсхолдеры (координаты жёстко заданы):
 {placeholder_desc}
 
-Тема оформления:
-{color_desc}
-Текстовые стили:
-{styles_desc}
+Ты можешь размещать в этих плейсхолдерах любые элементы (text, shape, icon, chart), **но не выходить за их границы**. Допускается создавать составные блоки внутри плейсхолдеров (например, прямоугольник с заливкой + текст поверх).
 
-Правила:
-1. Верни **только YAML** (без ```).
-2. В YAML должны быть только элементы, перечисленные в сетке.
-3. Для **text** укажи style согласно fontStyle плейсхолдера (например, "$title", "$subtitle", "$body", "$small").
-4. Для **icon** используй <<ICON:ключевое_слово|стиль>> (например, <<ICON:рост|bold>>).
-5. Для **chart** используй <<CHART:тип|количество>> (например, <<CHART:bar|4>>).
-6. Не меняй bounds ни у одного элемента.
-7. Используй цвета ТОЛЬКО через переменные со знаком $ (например, $primary).
+Обязательные правила по оформлению:
+1. Иконки должны быть **маленькими** (не более 200×200 пикселей). Используй их как маркеры списков или акценты рядом с текстом. Пример: bounds: [120, 250, 80, 80].
+2. Для выделения важных блоков используй **shape** (rect, roundedRect) с цветной заливкой из темы, а поверх него размещай text.
+3. Все тексты должны использовать стили из темы: $title, $subtitle, $body, $small.
+4. Не размещай элементы вплотную друг к другу — оставляй отступы минимум 20px между ними.
+5. Избегай слишком крупных блоков текста, разбивай на абзацы.
+6. Если есть свободное место, добавь небольшой декоративный элемент (иконку или небольшой shape), но не загромождай слайд.
 
-Пример заполненного слайда (роль content_with_chart):
-
+Пример хорошего слайда (роль title_and_content):
+```yaml
 background:
   type: solid
-  color: "$primary"
+  color: "$bgLight"
 elements:
   - elementType: text
     bounds: [120, 80, 1680, 120]
     content:
-      text: "<b>Обзор рынка</b>"
+      text: "<b>Основные выводы</b>"
       style: "$title"
       align: [center, middle]
-  - elementType: chart
-    bounds: [120, 240, 1200, 700]
-    type: bar
-    data: <<CHART:bar|4>>
-    colors: ["$accent", "$primary"]
+  - elementType: shape
+    bounds: [120, 240, 1680, 600]
+    shapeName: roundedRect
+    fill:
+      type: solid
+      color: "$primary"
+  - elementType: text
+    bounds: [160, 280, 800, 180]
+    content:
+      text: "<i>Рынок вырос на 30%</i>\nОблачные сервисы и IoT стали драйверами роста."
+      style: "$body"
+      align: [left, top]
   - elementType: icon
-    bounds: [1480, 800, 200, 200]
-    iconName: "<<ICON:аналитика|regular>>"
-
-Теперь создай слайд.
+    bounds: [1000, 280, 80, 80]
+    iconName: "<<ICON:рост|bold>>"
+  - elementType: text
+    bounds: [160, 480, 800, 180]
+    content:
+      text: "Основные угрозы: фишинг, программы-вымогатели, DDoS."
+      style: "$body"
+      align: [left, top]
+  - elementType: icon
+    bounds: [1000, 480, 80, 80]
+    iconName: "<<ICON:опасность|regular>>"
+```
+Теперь создай слайд для страницы, запрошенной пользователем.
 """
         if not include_charts:
             prompt += "\nГрафики отключены. Не используй chart и <<CHART>>."
@@ -147,6 +147,12 @@ elements:
                         element["iconName"] = matched if matched else "circle"
                     else:
                         element["iconName"] = "circle"
+                if isinstance(element["iconName"], dict):
+                    # Пытаемся вытащить имя из словаря
+                    d = element["iconName"]
+                    element["iconName"] = d.get("name", d.get("iconName", "circle"))
+                elif not isinstance(element["iconName"], str):
+                    element["iconName"] = str(element["iconName"])
             elif etype == "chart" and "data" in element:
                 data = element["data"]
                 if isinstance(data, str) and data.startswith("<<CHART:") and data.endswith(">>"):
@@ -158,41 +164,56 @@ elements:
                         chart_data = self.chart_tool.generate(chart_type, self.current_topic, count)
                         element["type"] = chart_type
                         element["data"] = chart_data
-                        if "colors" not in element:
-                            element["colors"] = ["$accent", "$primary", "$textLight"]
                     else:
                         element["type"] = chart_type
-                        element["data"] = [{"категория": f"Пример {i}", "значение": 10*(i+1)} for i in range(count)]
+                        element["data"] = [{"категория": f"Пример {i}", "значение": 10 * (i + 1)} for i in range(count)]
+                    if "colors" not in element:
+                        element["colors"] = ["$accent", "$primary", "$textLight"]
 
     def _enforce_grid(self, page: Dict, placeholders):
-        """Удаляет элементы, которых нет в сетке, и корректирует bounds разрешённых."""
-        allowed_bounds = [p.bounds for p in placeholders]
-        filtered = []
+        allowed = []
         for el in page.get("elements", []):
-            if "bounds" in el and el["bounds"] in allowed_bounds:
-                filtered.append(el)
-            else:
-                # Если координаты не совпадают точно – принудительно ставим ближайший подходящий плейсхолдер по типу
-                assigned = False
-                for p in placeholders:
-                    if p.element_type.value == el.get("elementType"):
-                        el["bounds"] = p.bounds  # жёстко перезаписываем
-                        filtered.append(el)
-                        assigned = True
-                        break
-                if not assigned:
-                    # Элемент не разрешён – пропускаем
-                    pass
-        page["elements"] = filtered
+            if "bounds" not in el:
+                continue
+            x, y, w, h = el["bounds"]
+            contained = False
+            for ph in placeholders:
+                px, py, pw, ph = ph.bounds
+                if x >= px and y >= py and x + w <= px + pw and y + h <= py + ph:
+                    contained = True
+                    break
+            if contained:
+                allowed.append(el)
+        page["elements"] = allowed  # <-- теперь после цикла
+
+    def _normalize_icon_sizes(self, page: Dict):
+        for el in page.get("elements", []):
+            if el.get("elementType") == "icon" and "bounds" in el:
+                w, h = el["bounds"][2], el["bounds"][3]
+                if w > 200 or h > 200:
+                    el["bounds"][2] = min(w, 200)
+                    el["bounds"][3] = min(h, 200)
+
+    def _fallback_page(self, role: SlideRole) -> Dict:
+        return {
+            "background": {"type": "solid", "color": "$primary"},
+            "elements": [
+                {
+                    "elementType": "text",
+                    "bounds": [200, 300, 1520, 200],
+                    "content": {
+                        "text": "⚠️ Ошибка генерации слайда",
+                        "style": "$title",
+                        "align": ["center", "middle"]
+                    }
+                }
+            ]
+        }
 
     def improve(self, page_name: str, current_yaml: str, instruction: str,
                 role: Optional[SlideRole] = None) -> Dict[str, Any]:
-        """
-        Улучшение существующей страницы. Вызывает генерацию заново с дополнительными инструкциями.
-        """
         if role is None:
             role = LayoutTool.classify_role(page_name)
-        # Передаём текущий YAML как часть контекста
         extra = f"Улучши существующий слайд: {instruction}. Текущий YAML: {current_yaml}"
         return self.generate(page_name, self.current_topic, "dark", "ru",
                              include_charts=True, include_icons=True,
