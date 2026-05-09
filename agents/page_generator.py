@@ -1,72 +1,69 @@
-# agents/page_generator.py (заменяем целиком)
-import yaml, json, re
+# agents/page_generator.py
+import yaml
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 from agents.base import BaseLLM
 from tools.icon_tool import IconTool
 from tools.chart_tool import ChartTool
+from tools.layout_tool import LayoutTool, SlideRole, Placeholder
 
 class PageGenerator:
-    def __init__(self, llm: BaseLLM, theme: Dict, icon_tool: Optional[IconTool] = None, chart_tool: Optional[ChartTool] = None):
+    def __init__(self, llm: BaseLLM, theme: Dict, icon_tool: Optional[IconTool] = None,
+                 chart_tool: Optional[ChartTool] = None, improver_tool=None):
         self.llm = llm
         self.theme = theme
         self.icon_tool = icon_tool
         self.chart_tool = chart_tool
+        self.improver_tool = improver_tool
+        self.current_topic = ""
 
     def generate(self, page_name: str, topic: str, style: str, language: str,
-                 include_charts: bool, include_icons: bool, extra: str = "") -> Dict[str, Any]:
-        system = self._build_system_prompt(include_charts, include_icons)
+                 include_charts: bool, include_icons: bool, extra: str = "",
+                 role: Optional[SlideRole] = None) -> Dict[str, Any]:
+        self.current_topic = topic
+        if role is None:
+            role = LayoutTool.classify_role(page_name)
+
+        placeholders = LayoutTool.get_placeholders(role)
+        system = self._build_system_prompt(include_charts, include_icons, role, placeholders)
         user = f"Страница: {page_name}. {extra} Тема: {topic}, стиль: {style}, язык: {language}."
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user}
         ]
-        max_iter = 5
-        for iteration in range(max_iter):
-            response = self.llm.chat(messages, temperature=0.4, max_tokens=1500)
-            messages.append({"role": "assistant", "content": response})
-            if not response.strip().startswith("NEED_"):
-                yaml_str = self._extract_yaml(response)
-                try:
-                    page = yaml.safe_load(yaml_str)
-                    if not isinstance(page, dict):
-                        raise ValueError("Не словарь")
-                except Exception:
-                    messages.append({"role": "user", "content": "Невалидный YAML. Повтори только YAML."})
-                    continue
-                self._process_placeholders(page)
-                return page
-            if "NEED_ICON:" in response:
-                descriptions = re.findall(r'NEED_ICON:\s*(.*?)(?=NEED_ICON|NEED_CHART|$)', response, re.DOTALL)
-                for desc in descriptions:
-                    desc = desc.strip().rstrip('.').strip()
-                    # Пытаемся извлечь стиль, если есть
-                    parts = desc.split('|')
-                    query = parts[0].strip()
-                    preferred_style = parts[1].strip() if len(parts) > 1 else 'regular'
-                    if self.icon_tool:
-                        icon_name = self.icon_tool.get_best_match(query, preferred_style)
-                        result = f"ICON_RESULT: use iconName: \"{icon_name}\"" if icon_name else "ICON_RESULT: no match"
-                    else:
-                        result = "ICON_RESULT: icons not available"
-                    messages.append({"role": "tool", "content": result, "name": "icon_search"})
-                continue
-            if "NEED_CHART:" in response:
-                desc_match = re.search(r'NEED_CHART:\s*(\S+)', response)
-                if desc_match:
-                    spec = desc_match.group(1)
-                    parts = spec.split("|")
-                    chart_type = parts[0] if parts else "bar"
-                    count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 4
-                    if self.chart_tool:
-                        data = self.chart_tool.generate(chart_type, topic)
-                        result = f"CHART_RESULT: type={chart_type}, data={json.dumps(data)}"
-                    else:
-                        result = "CHART_RESULT: charts not available"
-                    messages.append({"role": "tool", "content": result, "name": "chart_generator"})
-                continue
-            messages.append({"role": "user", "content": "Пожалуйста, выдай финальный YAML слайда."})
-        raise RuntimeError(f"Не удалось сгенерировать {page_name} за {max_iter} итераций")
+
+        # Модель отвечает один раз, так как координаты фиксированы
+        response = self.llm.chat(messages, temperature=0.5, max_tokens=2000)
+        yaml_str = self._extract_yaml(response)
+
+        try:
+            page = yaml.safe_load(yaml_str)
+            if not isinstance(page, dict):
+                raise ValueError("Не словарь")
+        except Exception:
+            # fallback – пустая страница с плейсхолдерами
+            page = {
+                "background": {"type": "solid", "color": "$primary"},
+                "elements": [
+                    {
+                        "elementType": "text",
+                        "bounds": [200, 300, 1520, 200],
+                        "content": {
+                            "text": "⚠️ Ошибка генерации слайда",
+                            "style": "$title",
+                            "align": ["center", "middle"]
+                        }
+                    }
+                ]
+            }
+
+        # Постобработка плейсхолдеров
+        self._process_placeholders(page)
+        # Фильтрация: оставляем только элементы, разрешённые сеткой
+        self._enforce_grid(page, placeholders)
+
+        return page
 
     def _extract_yaml(self, text: str) -> str:
         match = re.search(r'```yaml\s*(.*?)\s*```', text, re.DOTALL)
@@ -77,8 +74,7 @@ class PageGenerator:
             return match.group(1).strip()
         return text.strip()
 
-    def _build_system_prompt(self, include_charts, include_icons):
-        # Подставляем реальные цвета и стили из self.theme
+    def _build_system_prompt(self, include_charts, include_icons, role: SlideRole, placeholders):
         colors = self.theme.get("colors", {})
         color_desc = "\n".join([f"    {k}: \"{v}\"" for k, v in colors.items()])
         text_styles = self.theme.get("textStyles", {})
@@ -87,80 +83,49 @@ class PageGenerator:
             for k, v in text_styles.items()
         ])
 
-        prompt = f"""Ты — генератор слайда презентации в формате Kimi PPTD (YAML). Используй тему ниже.
+        placeholder_desc = LayoutTool.describe_placeholders(placeholders)
 
-    Тема (colors и textStyles):
-    theme:
-      colors:
-    {color_desc}
-      textStyles:
-    {styles_desc}
+        prompt = f"""Ты — генератор контента слайда. Слайд имеет роль **{role.value}**. Используй СТРОГО следующую сетку:
 
-    Создай ТОЛЬКО содержимое слайда в виде валидного YAML без обрамляющих ```. Структура:
+{placeholder_desc}
 
-    background:
-      type: solid
-      color: "$primary"   # или другой цвет из theme со знаком $
+Тема оформления:
+{color_desc}
+Текстовые стили:
+{styles_desc}
 
-    elements:
-      - elementType: text
-        bounds: [x, y, width, height]   # пиксели, слайд 1920×1080
-        content:
-          text: "Текст (<b>жирный</b>, <i>курсив</i>)"
-          style: "$title"               # имя стиля из textStyles
-          align: [center, middle]       # горизонталь: left/center/right, вертикаль: top/middle/bottom
+Правила:
+1. Верни **только YAML** (без ```).
+2. В YAML должны быть только элементы, перечисленные в сетке.
+3. Для **text** укажи style согласно fontStyle плейсхолдера (например, "$title", "$subtitle", "$body", "$small").
+4. Для **icon** используй <<ICON:ключевое_слово|стиль>> (например, <<ICON:рост|bold>>).
+5. Для **chart** используй <<CHART:тип|количество>> (например, <<CHART:bar|4>>).
+6. Не меняй bounds ни у одного элемента.
+7. Используй цвета ТОЛЬКО через переменные со знаком $ (например, $primary).
 
-      - elementType: icon
-        iconName: "имя_иконки"          # можно <<ICON:описание|стиль>> (например, <<ICON:щит|bold>>)
-        bounds: [...]
+Пример заполненного слайда (роль content_with_chart):
 
-      - elementType: chart
-        type: bar
-        data:                          # данные ИЛИ <<CHART:тип|количество_точек>>
-          - {{"категория": "А", "значение": 34}}
-          - {{"категория": "Б", "значение": 56}}
-        colors: ["$accent", "$primary"]
-        bounds: [...]
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementType: text
+    bounds: [120, 80, 1680, 120]
+    content:
+      text: "<b>Обзор рынка</b>"
+      style: "$title"
+      align: [center, middle]
+  - elementType: chart
+    bounds: [120, 240, 1200, 700]
+    type: bar
+    data: <<CHART:bar|4>>
+    colors: ["$accent", "$primary"]
+  - elementType: icon
+    bounds: [1480, 800, 200, 200]
+    iconName: "<<ICON:аналитика|regular>>"
 
-    Важно:
-    - Слайд 1920×1080 пикселей. Все bounds должны быть в этих пределах.
-    - Наполни слайд минимум 2-3 элементами (текст + иконка/график/фигура).
-    - Иконки: используй placeholder <<ICON:ключевое_слово|стиль>>. Стили: thin, light, regular, bold, fill, duotone.
-    - Графики: используй placeholder <<CHART:тип|количество>> (например, <<CHART:bar|4>>) или свои числа, но строго больше 0.
-    - Цвета только со знаком $ из theme.
-
-    Пример качественного слайда:
-
-    background:
-      type: solid
-      color: "$primary"
-    elements:
-      - elementType: text
-        bounds: [120, 200, 1680, 300]
-        content:
-          text: "<b>Ключевые выводы</b>"
-          style: "$title"
-          align: [center, middle]
-      - elementType: text
-        bounds: [120, 500, 1680, 400]
-        content:
-          text: "Рынок кибербезопасности вырос на 30% за последний год. Основные драйверы — облачные технологии и IoT."
-          style: "$body"
-          align: [left, top]
-      - elementType: icon
-        iconName: "<<ICON:безопасность|bold>>"
-        bounds: [1600, 800, 200, 200]
-      - elementType: chart
-        type: bar
-        data:
-          - {{"сегмент": "Облачные", "оборот": 340}}
-          - {{"сегмент": "IoT", "оборот": 280}}
-          - {{"сегмент": "Мобильные", "оборот": 210}}
-        colors: ["$accent", "$primary", "$textLight"]
-        bounds: [200, 300, 1520, 500]
-
-    Теперь создай слайд для страницы, которую запросил пользователь.
-    """
+Теперь создай слайд.
+"""
         if not include_charts:
             prompt += "\nГрафики отключены. Не используй chart и <<CHART>>."
         if not include_icons:
@@ -173,7 +138,7 @@ class PageGenerator:
             if etype == "icon" and "iconName" in element:
                 name = element["iconName"]
                 if isinstance(name, str) and name.startswith("<<ICON:") and name.endswith(">>"):
-                    inner = name[7:-2]  # "описание|стиль"
+                    inner = name[7:-2]
                     parts = inner.split('|')
                     query = parts[0].strip()
                     preferred_style = parts[1].strip() if len(parts) > 1 else 'regular'
@@ -190,11 +155,45 @@ class PageGenerator:
                     chart_type = parts[0] if parts else "bar"
                     count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 4
                     if self.chart_tool:
-                        chart_data = self.chart_tool.generate(chart_type, "topic", count)
+                        chart_data = self.chart_tool.generate(chart_type, self.current_topic, count)
                         element["type"] = chart_type
                         element["data"] = chart_data
                         if "colors" not in element:
-                            element["colors"] = ["$accent", "$secondary", "$primary"]
+                            element["colors"] = ["$accent", "$primary", "$textLight"]
                     else:
                         element["type"] = chart_type
                         element["data"] = [{"категория": f"Пример {i}", "значение": 10*(i+1)} for i in range(count)]
+
+    def _enforce_grid(self, page: Dict, placeholders):
+        """Удаляет элементы, которых нет в сетке, и корректирует bounds разрешённых."""
+        allowed_bounds = [p.bounds for p in placeholders]
+        filtered = []
+        for el in page.get("elements", []):
+            if "bounds" in el and el["bounds"] in allowed_bounds:
+                filtered.append(el)
+            else:
+                # Если координаты не совпадают точно – принудительно ставим ближайший подходящий плейсхолдер по типу
+                assigned = False
+                for p in placeholders:
+                    if p.element_type.value == el.get("elementType"):
+                        el["bounds"] = p.bounds  # жёстко перезаписываем
+                        filtered.append(el)
+                        assigned = True
+                        break
+                if not assigned:
+                    # Элемент не разрешён – пропускаем
+                    pass
+        page["elements"] = filtered
+
+    def improve(self, page_name: str, current_yaml: str, instruction: str,
+                role: Optional[SlideRole] = None) -> Dict[str, Any]:
+        """
+        Улучшение существующей страницы. Вызывает генерацию заново с дополнительными инструкциями.
+        """
+        if role is None:
+            role = LayoutTool.classify_role(page_name)
+        # Передаём текущий YAML как часть контекста
+        extra = f"Улучши существующий слайд: {instruction}. Текущий YAML: {current_yaml}"
+        return self.generate(page_name, self.current_topic, "dark", "ru",
+                             include_charts=True, include_icons=True,
+                             extra=extra, role=role)

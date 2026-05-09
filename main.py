@@ -74,12 +74,12 @@ async def converter_page(request: Request):
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/api/generate")
-async def generate_presentation(request: PresentationRequest, background_tasks: BackgroundTasks):
+async def generate_presentation(request: PresentationRequest,
+                                 background_tasks: BackgroundTasks):
     project_id = f"proj_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     proj_dir = PROJECTS_DIR / project_id
     proj_dir.mkdir(exist_ok=True)
 
-    # Сохраняем метаданные
     meta = {
         "topic": request.topic,
         "slides_count": request.slides_count,
@@ -97,48 +97,56 @@ async def generate_presentation(request: PresentationRequest, background_tasks: 
     with open(proj_dir / "meta.json", 'w', encoding='utf-8') as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
+    background_tasks.add_task(
+        run_generation,
+        project_id,
+        request.topic,
+        request.slides_count,
+        request.style,
+        request.language,
+        request.include_charts,
+        request.include_icons,
+        request.model_type
+    )
+    return JSONResponse({
+        "status": "accepted",
+        "message": "Генерация запущена",
+        "project_id": project_id,
+    })
+
+
+def run_generation(project_id, topic, slides_count, style, language,
+                    include_charts, include_icons, model_type):
+    proj_dir = PROJECTS_DIR / project_id
+    def update_meta(**kwargs):
+        meta_path = proj_dir / "meta.json"
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+        except:
+            meta = {}
+        meta.update(kwargs)
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
     try:
-        # Создаём агента
-        agent = create_agent(
-            request.model_type,
-            local_base_url=LOCAL_LLM_URL,
-            icons_dir=ICONS_DIR
-        )
-
-        # Генерируем проект (.pptd и .page)
+        agent = create_agent(model_type,
+                             local_base_url=LOCAL_LLM_URL,
+                             icons_dir=ICONS_DIR)
         agent.generate(
-            topic=request.topic,
-            slides_count=request.slides_count,
-            style=request.style,
-            language=request.language,
-            include_charts=request.include_charts,
-            include_icons=request.include_icons,
-            output_dir=proj_dir
+            topic=topic, slides_count=slides_count,
+            style=style, language=language,
+            include_charts=include_charts,
+            include_icons=include_icons,
+            output_dir=proj_dir,
+            progress_callback=lambda pct, msg: update_meta(progress=pct, message=msg)
         )
-
-        # Конвертируем в PPTX
         output_pptx = proj_dir / f"{project_id}.pptx"
         converter = KimiPptdConverter(icons_base_dir=ICONS_DIR)
         converter.convert(str(proj_dir), str(output_pptx))
-
-        # Обновляем статус
-        meta["status"] = "completed"
-        meta["converted"] = datetime.now().isoformat()
-        with open(proj_dir / "meta.json", 'w', encoding='utf-8') as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-
-        return JSONResponse({
-            "status": "completed",
-            "message": "Презентация готова",
-            "project_id": project_id,
-            "download_url": f"/api/download/{project_id}",
-        })
+        update_meta(status="completed", progress=100, message="Готово! Нажмите Скачать.")
     except Exception as e:
-        meta["status"] = "error"
-        meta["error"] = str(e)
-        with open(proj_dir / "meta.json", 'w', encoding='utf-8') as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-        raise HTTPException(500, detail=str(e))
+        update_meta(status="error", message=str(e), progress=0)
 
 
 @app.get("/api/generate-status/{project_id}")
@@ -146,21 +154,15 @@ async def generate_status(project_id: str):
     proj_dir = PROJECTS_DIR / project_id
     if not proj_dir.exists():
         raise HTTPException(404, "Проект не найден")
-
     meta_path = proj_dir / "meta.json"
-    if not meta_path.exists():
-        raise HTTPException(404, "Метаданные не найдены")
-
     with open(meta_path, 'r', encoding='utf-8') as f:
         meta = json.load(f)
-
-    has_pptx = (proj_dir / f"{project_id}.pptx").exists()
     return JSONResponse({
         "project_id": project_id,
         "status": meta.get("status", "unknown"),
         "progress": meta.get("progress", 0),
-        "has_pptx": has_pptx,
-        "download_url": f"/api/download/{project_id}" if has_pptx else None,
+        "message": meta.get("message", ""),
+        "download_url": f"/api/download/{project_id}" if meta.get("status") == "completed" else None,
     })
 
 
