@@ -179,12 +179,31 @@ class KimiPptdConverter:
         self.theme = pptd.get("theme", {})
         self.colors = self.theme.get("colors", {})
         self.text_styles = self.theme.get("textStyles", {})
+
+        # === НОВОЕ: fontPair ===
+        font_pair = self.theme.get("fontPair", "Arial + Arial")
+        self.title_font, self.body_font = self._parse_font_pair(font_pair)
+
+        # Применяем fontPair к text_styles если там не указаны шрифты
+        for style_name, style in self.text_styles.items():
+            if "fontFamily" not in style:
+                if style_name in ("title", "subtitle"):
+                    style["fontFamily"] = self.title_font
+                else:
+                    style["fontFamily"] = self.body_font
         self.table_styles = self.theme.get("tableStyles", {})
 
         self.pages_dir = project_dir / "pages"
         self.images_dir = project_dir / "images"
 
         return pptd.get("pages", [])
+
+    def _parse_font_pair(self, font_pair: str) -> tuple:
+        """'Montserrat + Inter' → ('Montserrat', 'Inter')"""
+        parts = font_pair.replace(" + ", "+").split("+")
+        if len(parts) == 2:
+            return parts[0].strip(), parts[1].strip()
+        return "Arial", "Arial"
 
     def resolve_color(self, val):
         if isinstance(val, str) and val.startswith("$"):
@@ -360,11 +379,15 @@ class KimiPptdConverter:
         if style_ref.startswith("$"):
             style = self.text_styles.get(style_ref[1:], {})
 
-        font_size = content.get("fontSize", style.get("fontSize", 18))
-        base_color = self.resolve_color(content.get("color", style.get("color", "$textDark")))
-        font_family = content.get("fontFamily", style.get("fontFamily", "Arial"))
-        line_height = content.get("lineHeight", style.get("lineHeight", 1.2))
+        # === НОВОЕ: spacing scale для line_height ===
+        spacing_scale = self.theme.get("spacingScale", [8, 16, 24, 32, 48, 64])
+        base_line_height = style.get("lineHeight", 1.2)
 
+        # Округляем line_height до ближайшего из spacing_scale / fontSize
+        font_size = content.get("fontSize", style.get("fontSize", 18))
+        ideal_spacing = font_size * base_line_height
+        snapped_spacing = min(spacing_scale, key=lambda s: abs(s - ideal_spacing))
+        line_height = snapped_spacing / font_size if font_size > 0 else 1.2
         align_cfg = content.get("align", ["left", "top"])
         h_align = align_cfg[0] if len(align_cfg) > 0 else "left"
 
@@ -378,6 +401,22 @@ class KimiPptdConverter:
 
         text_raw = content.get("text", "")
         paragraphs = [p.strip() for p in text_raw.strip().split("\n") if p.strip()]
+
+        # Автоподбор размера шрифта
+        text_raw = content.get("text", "")
+        style_info = self.text_styles.get(style_ref.lstrip("$"), {})
+        base_size = style_info.get("fontSize", 18)
+
+        # Оцениваем, влезет ли текст
+        estimated_lines = len(text_raw) / (w / (base_size * 0.6))  # примерная ширина символа
+        available_lines = h / (base_size * 1.5)
+
+        if estimated_lines > available_lines * 1.2:
+            # Уменьшаем шрифт пропорционально
+            scale = (available_lines * 1.2) / estimated_lines
+            font_size = max(14, int(base_size * scale))
+        else:
+            font_size = base_size
 
         for idx, para_text in enumerate(paragraphs):
             p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()

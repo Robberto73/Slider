@@ -41,12 +41,17 @@ class ChartTool:
             labels.append(f"Категория {len(labels)+1}")
         return labels[:count]
 
-    def _llm_labels(self, topic: str, count: int) -> List[str]:
-        """Запрашивает у LLM список релевантных категорий."""
+    def _llm_labels(self, topic: str, count: int, context: str = "") -> List[str]:
+        """Умные метки с контекстом."""
         prompt = (
-            f"Для темы \"{topic}\" придумай {count} коротких названий категорий "
-            f"для графика. Верни ТОЛЬКО список строк через запятую, без кавычек. "
-            f"Пример: Москва, Санкт-Петербург, Казань"
+            f"Тема презентации: '{topic}'\n"
+            f"Контекст слайда: {context}\n"
+            f"Придумай {count} коротких названий категорий для графика. "
+            f"Они должны быть:\n"
+            f"- Релевантны теме (не абстрактные 'Категория 1')\n"
+            f"- Разной длины (2-4 слова)\n"
+            f"- Содержать конкретику (годы, регионы, продукты)\n"
+            f"Верни ТОЛЬКО список через запятую."
         )
         try:
             resp = self.llm.chat([{"role": "user", "content": prompt}],
@@ -59,12 +64,26 @@ class ChartTool:
         except Exception:
             return self._keyword_labels(topic, count)
 
-    def _generate_values(self, count: int, topic: str) -> List[float]:
-        """Генерирует правдоподобные числа (с трендом, если в теме есть ключевые слова)."""
-        base = [round(random.uniform(10, 300), 1) for _ in range(count)]
-        # Если тема про рост/падение – делаем тренд
-        if any(w in topic.lower() for w in ("рост", "увеличение", "повышение")):
-            base.sort()
-        elif any(w in topic.lower() for w in ("падение", "снижение", "уменьшение")):
-            base.sort(reverse=True)
-        return base
+    def _generate_values(self, count: int, topic: str, trend: str = None) -> List[float]:
+        """Генерирует правдоподобные числа с учётом контекста темы."""
+        # Определяем масштаб из темы
+        if any(w in topic.lower() for w in ("миллиард", "billion", "млрд")):
+            base_scale = 1_000_000_000
+        elif any(w in topic.lower() for w in ("миллион", "million", "млн")):
+            base_scale = 1_000_000
+        elif any(w in topic.lower() for w in ("процент", "%", "percent")):
+            base_scale = 100
+        else:
+            base_scale = 1000
+
+        # Генерируем с трендом
+        if trend == "growth":
+            values = [base_scale * (0.5 + i * 0.3 + random.uniform(-0.1, 0.1)) for i in range(count)]
+        elif trend == "decline":
+            values = [base_scale * (2.0 - i * 0.4 + random.uniform(-0.1, 0.1)) for i in range(count)]
+        elif trend == "volatile":
+            values = [base_scale * random.uniform(0.3, 2.0) for _ in range(count)]
+        else:  # stable
+            values = [base_scale * random.uniform(0.8, 1.2) for _ in range(count)]
+
+        return [round(v, 1) for v in values]

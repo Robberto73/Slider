@@ -36,12 +36,19 @@ class Placeholder:
 
 class SlideRole(Enum):
     COVER = "cover"
+    AGENDA = "agenda"                    # NEW
     TITLE_AND_CONTENT = "title_and_content"
     TWO_CONTENT = "two_content"
+    THREE_CONTENT = "three_content"      # NEW
     CONTENT_WITH_CHART = "content_with_chart"
     CONTENT_WITH_TABLE = "content_with_table"
+    QUOTE = "quote"                      # NEW — цитата/вывод
+    TIMELINE = "timeline"                # NEW — дорожная карта
+    COMPARISON = "comparison"            # NEW — до/после или A/B
     CONCLUSION = "conclusion"
     BLANK = "blank"
+    TEAM = "team"                        # NEW — фото + имя + роль
+    METRICS = "metrics"                  # NEW — 3-4 KPI в ряд
 
 # Предопределённые шаблоны для ролей (сетка)
 # Координаты подобраны для слайда 1920x1080 с отступами
@@ -77,6 +84,32 @@ TEMPLATES = {
     ],
     SlideRole.BLANK: [
         Placeholder(ElementType.TEXT, [200, 300, 1520, 400], role="content", font_style="body"),
+    ],
+    SlideRole.AGENDA: [
+        Placeholder(ElementType.TEXT, [120, 80, 1680, 120], role="title", max_chars=100, font_style="title"),
+        Placeholder(ElementType.TEXT, [120, 240, 1680, 600], role="agenda_items", max_chars=600, font_style="body"),
+        Placeholder(ElementType.SHAPE, [120, 240, 4, 600], role="timeline_line"),  # вертикальная линия
+    ],
+
+    SlideRole.QUOTE: [
+        Placeholder(ElementType.SHAPE, [200, 200, 100, 100], role="quote_mark", max_chars=10),  # большая кавычка
+        Placeholder(ElementType.TEXT, [350, 250, 1220, 300], role="quote_text", max_chars=300, font_style="title"),
+        Placeholder(ElementType.TEXT, [350, 580, 1220, 60], role="author", max_chars=100, font_style="subtitle"),
+    ],
+
+    SlideRole.METRICS: [
+        Placeholder(ElementType.TEXT, [120, 80, 1680, 120], role="title", max_chars=100, font_style="title"),
+        Placeholder(ElementType.TEXT, [120, 300, 400, 200], role="metric_1", max_chars=50, font_style="title"),
+        Placeholder(ElementType.TEXT, [560, 300, 400, 200], role="metric_2", max_chars=50, font_style="title"),
+        Placeholder(ElementType.TEXT, [1000, 300, 400, 200], role="metric_3", max_chars=50, font_style="title"),
+        Placeholder(ElementType.TEXT, [1440, 300, 400, 200], role="metric_4", max_chars=50, font_style="title"),
+    ],
+
+    SlideRole.THREE_CONTENT: [
+        Placeholder(ElementType.TEXT, [120, 80, 1680, 120], role="title", max_chars=100, font_style="title"),
+        Placeholder(ElementType.TEXT, [120, 240, 520, 600], role="col_1", max_chars=400, font_style="body"),
+        Placeholder(ElementType.TEXT, [700, 240, 520, 600], role="col_2", max_chars=400, font_style="body"),
+        Placeholder(ElementType.TEXT, [1280, 240, 520, 600], role="col_3", max_chars=400, font_style="body"),
     ],
 }
 

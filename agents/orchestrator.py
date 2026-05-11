@@ -1,3 +1,4 @@
+# agents/orchestrator.py
 import json
 import yaml
 import re
@@ -10,6 +11,7 @@ from tools.chart_tool import ChartTool
 from tools.page_improver import PageImproverTool
 from tools.layout_tool import LayoutTool, SlideRole
 from tools.presentation_memory import PresentationMemory
+from tools.polisher import PresentationPolisher
 
 
 class OrchestratorAgent(PresentationAgent):
@@ -61,22 +63,22 @@ class OrchestratorAgent(PresentationAgent):
                                    include_charts, include_icons, extra, role)
             pages_content[page_name] = content
 
-            # Запоминаем заголовок и иконки
+            # Запоминаем заголовок и иконки этого слайда
             title = self._extract_title(content)
             icons = self._extract_icons(content)
             self.memory.add_slide(page_name, title, icons)
 
-        # АДАПТИВНОЕ УЛУЧШЕНИЕ
+        # Адаптивное улучшение: проверяем качество всей презентации
         if progress_callback:
             progress_callback(85, "Анализ качества презентации…")
 
-        pages_content = self._auto_improve_presentation(
-            pages_content, theme, topic, style, language,
-            include_charts, include_icons
-        )
+        pages_content = self._auto_improve_presentation(pages_content, theme, topic, style, language,
+                                                        include_charts, include_icons)
 
         if progress_callback:
             progress_callback(90, "Сохранение проекта…")
+
+        pages_content = PresentationPolisher.polish(pages_content, theme)
         self._save(theme, pages_content, output_dir)
 
         if progress_callback:
@@ -84,7 +86,216 @@ class OrchestratorAgent(PresentationAgent):
         return {"status": "completed", "progress": 100}
 
     # ═══════════════════════════════════════════════════════════
-    # РЕФЛЕКСИВНОЕ УЛУЧШЕНИЕ (полностью переработано)
+    # ПЛАНИРОВАНИЕ С ЗАЩИТОЙ ОТ ОШИБОК
+    # ═══════════════════════════════════════════════════════════
+
+    def _create_plan(self, topic, slides_count, style, language,
+                     include_charts, include_icons):
+        theme = {
+            "colors": {
+                "primary": "#1E3330",
+                "accent": "#C9892E",
+                "bgLight": "#F0EDEA",
+                "bgDark": "#1C2524",
+                "textDark": "#1C2524",
+                "textLight": "#F0EDEA",
+                "cardBg": "#FFFFFF",
+                "border": "#D5D0CA",
+                "success": "#2E7D32",
+                "warning": "#ED6C02",
+                "danger": "#D32F2F"
+            },
+            "textStyles": {
+                "title": {"fontSize": 44, "fontFamily": "Montserrat", "lineHeight": 1.2, "weight": "bold"},
+                "subtitle": {"fontSize": 28, "fontFamily": "Montserrat", "lineHeight": 1.3, "weight": "medium"},
+                "body": {"fontSize": 20, "fontFamily": "Inter", "lineHeight": 1.5, "weight": "regular"},
+                "small": {"fontSize": 16, "fontFamily": "Inter", "lineHeight": 1.4, "weight": "regular"},
+                "caption": {"fontSize": 14, "fontFamily": "Inter", "lineHeight": 1.3, "weight": "regular"},
+                "metric": {"fontSize": 56, "fontFamily": "Montserrat", "lineHeight": 1.0, "weight": "bold"}
+            },
+            "fontPair": "Montserrat + Inter",
+            "spacingScale": [8, 16, 24, 32, 48, 64, 96],  # базовые отступы
+            "borderRadius": [0, 4, 8, 12, 16, 24],
+            "shadows": {
+                "card": "0 2px 8px rgba(0,0,0,0.08)",
+                "elevated": "0 8px 24px rgba(0,0,0,0.12)"
+            }
+        }
+        system = """Ты — стратегический планировщик презентаций McKinsey-уровня.
+        Каждая презентация — это аргумент (story), а не набор слайдов.
+        Структура: Ситуация → Проблема → Решение → Доказательства → Действие."""
+
+        # Определяем story arc в зависимости от количества слайдов
+        arc_templates = {
+            5: ["hook", "problem", "solution", "proof", "cta"],
+            7: ["cover", "agenda", "problem", "solution", "proof", "details", "cta"],
+            10: ["cover", "agenda", "context", "problem", "solution_overview",
+                 "solution_details", "proof_data", "proof_cases", "risks", "cta"],
+            15: ["cover", "agenda", "executive_summary", "market_context",
+                 "problem_deep", "solution_vision", "solution_architecture",
+                 "solution_features", "data_evidence", "case_studies",
+                 "competitive", "implementation", "team", "financials", "cta"]
+        }
+
+        # Ближайший шаблон
+        target_arc = arc_templates.get(slides_count, arc_templates[7])
+        if slides_count > 15:
+            # Расширяем базовый 15-слайдовый
+            target_arc = arc_templates[15] + [f"detail_{i}" for i in range(slides_count - 15)]
+
+        user = (
+            f'Тема: "{topic}"\n'
+            f'Слайдов: {slides_count}, стиль: {style}, язык: {language}.\n'
+            f'Графики: {"да" if include_charts else "нет"}, '
+            f'Иконки: {"да" if include_icons else "нет"}.\n\n'
+            f'Нарративная структура ({len(target_arc)} слайдов):\n'
+            f'{", ".join(target_arc)}\n\n'
+            f'Для КАЖДОГО слайда укажи:\n'
+            f'- name: имя файла (например, 01_cover.page)\n'
+            f'- title: заголовок, который ПРОДАЁТ идею (не описывает, а убеждает)\n'
+            f'- role: из списка: cover, agenda, title_and_content, two_content, '
+            f'content_with_chart, content_with_table, conclusion, quote, timeline, comparison\n'
+            f'- narrative_purpose: зачем этот слайд в истории (1 предложение)\n'
+            f'- key_message: главная мысль, которую зритель должен унести\n'
+            f'- bullets: 3-5 тезисов, каждый — максимум 12 слов, начинается с глагола\n'
+            f'- icon_ideas: 2-3 иконки, которые визуально усилят сообщение\n'
+            f'- chart_suggestion: если уместно — тип данных и инсайт, который график покажет\n'
+            f'- emotional_tone: formal / inspiring / urgent / calm / provocative\n'
+            f'\nТакже предложи тему (colors, textStyles, fontPair).\n'
+            f'fontPair — пара шрифтов: заголовочный и текстовый (например, "Montserrat + Inter")\n'
+            f'\nОтвет ТОЛЬКО JSON. Без комментариев.'
+        )
+
+
+
+        # Пробуем до 3 раз с понижением температуры
+        for attempt in range(3):
+            temp = max(0.1, 0.5 - attempt * 0.15)
+            try:
+                resp = self.llm.chat(
+                    [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+                    temperature=temp,
+                    max_tokens=2000
+                )
+
+
+
+                plan = self._parse_plan_response(resp, slides_count, style)
+                if isinstance(plan, dict) and "pages" in plan:
+                    return plan
+            except Exception as e:
+                print(f"⚠ Попытка {attempt+1} планирования не удалась: {e}")
+
+        # Все попытки провалились — fallback
+        return self._default_plan(topic, slides_count, style)
+
+    def _parse_plan_response(self, resp, slides_count, style):
+        """Парсит ответ LLM в план с защитой от ошибок."""
+        if not isinstance(resp, str):
+            resp = str(resp) if resp else "{}"
+
+        json_str = resp.strip()
+
+        # Убираем markdown
+        for prefix in ["```json", "```yaml", "```"]:
+            if json_str.startswith(prefix):
+                json_str = json_str[len(prefix):]
+        if json_str.endswith("```"):
+            json_str = json_str[:-3]
+        json_str = json_str.strip()
+
+        # Ищем JSON
+        start_brace = json_str.find("{")
+        end_brace = json_str.rfind("}")
+        if start_brace == -1 or end_brace == -1 or end_brace <= start_brace:
+            raise ValueError("JSON не найден в ответе")
+
+        json_str = json_str[start_brace:end_brace + 1]
+
+        try:
+            plan = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            print(f"⚠ Ошибка парсинга JSON: {e}\nТекст: {json_str[:500]}")
+            raise ValueError("План не является валидным JSON")
+
+        # Защита: проверяем структуру
+        if not isinstance(plan, dict):
+            raise ValueError("Распарсенный план не словарь")
+
+        if "pages" not in plan or not isinstance(plan.get("pages"), list):
+            plan["pages"] = []
+
+        # Дозаполняем до нужного количества
+        detailed_pages = plan["pages"]
+        while len(detailed_pages) < slides_count:
+            detailed_pages.append({
+                "name": f"slide_{len(detailed_pages)}.page",
+                "title": f"Слайд {len(detailed_pages)+1}",
+                "role": "title_and_content",
+                "bullets": [],
+                "icon_ideas": [],
+                "chart_suggestion": None
+            })
+        plan["pages"] = detailed_pages[:slides_count]
+
+        # Защита: theme
+        if "theme" not in plan or not isinstance(plan.get("theme"), dict):
+            plan["theme"] = self._default_theme(style)
+
+        return plan
+
+    def _default_plan(self, topic, slides_count, style):
+        """Гарантированный план при провале LLM."""
+        return {
+            "theme": self._default_theme(style),
+            "pages": [
+                {
+                    "name": f"{i:02d}_slide.page",
+                    "title": f"Слайд {i+1}",
+                    "role": "title_and_content",
+                    "bullets": [f"Пункт {j+1} для темы: {topic[:50]}" for j in range(3)],
+                    "icon_ideas": ["circle"],
+                    "chart_suggestion": None
+                }
+                for i in range(slides_count)
+            ]
+        }
+
+    def _default_theme(self, style):
+        """Дефолтная тема."""
+        is_dark = style == "dark"
+        return {
+            "colors": {
+                "primary": "#1E3330",
+                "accent": "#C9892E",
+                "bgLight": "#1C2524" if is_dark else "#F0EDEA",
+                "bgDark": "#1C2524",
+                "textDark": "#F0EDEA" if is_dark else "#1C2524",
+                "textLight": "#F0EDEA",
+                "cardBg": "#2A3F3C" if is_dark else "#FFFFFF",
+                "border": "#D5D0CA"
+            },
+            "textStyles": {
+                "title": {"fontSize": 44, "fontFamily": "Arial", "lineHeight": 1.2},
+                "subtitle": {"fontSize": 28, "fontFamily": "Arial", "lineHeight": 1.3},
+                "body": {"fontSize": 20, "fontFamily": "Arial", "lineHeight": 1.5},
+                "small": {"fontSize": 16, "fontFamily": "Arial", "lineHeight": 1.4}
+            },
+            "tableStyles": {
+                "default": {
+                    "headerFill": "$primary",
+                    "headerColor": "$textLight",
+                    "bodyFill": ["$bgLight", "$cardBg"],
+                    "bodyColor": "$textDark",
+                    "fontSize": 16,
+                    "fontFamily": "Arial"
+                }
+            }
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    # РЕФЛЕКСИВНОЕ УЛУЧШЕНИЕ (переработано)
     # ═══════════════════════════════════════════════════════════
 
     def _auto_improve_presentation(self, pages_content: Dict[str, Any], theme: Dict,
@@ -185,7 +396,6 @@ class OrchestratorAgent(PresentationAgent):
         if bg.get("type") == "solid" and bg.get("color") == "$primary":
             issues.append("Фон слайда чёрный — возможно, ошибка генерации")
 
-        # Проверка перекрытий
         overlaps = self._count_overlaps(elements)
         if overlaps > 0:
             issues.append(f"{overlaps} пар элементов перекрываются")
@@ -236,7 +446,6 @@ class OrchestratorAgent(PresentationAgent):
         colors = theme.get("colors", {})
         bg = colors.get("bgLight", "$bgLight")
         text = colors.get("textDark", "$textDark")
-        accent = colors.get("accent", "$accent")
 
         # Извлекаем заголовок из оригинала, если есть
         original_title = "Заголовок слайда"
@@ -357,77 +566,6 @@ class OrchestratorAgent(PresentationAgent):
     # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
     # ═══════════════════════════════════════════════════════════
 
-    def _create_plan(self, topic, slides_count, style, language,
-                     include_charts, include_icons):
-        system = "Ты — планировщик презентаций. Отвечай строго JSON без ```json."
-        user = (
-            f'Запрос пользователя:\n{topic}\n\n'
-            f'Слайдов: {slides_count}, стиль: {style}, язык: {language}.\n'
-            f'Графики: {"да" if include_charts else "нет"}, '
-            f'Иконки: {"да" if include_icons else "нет"}.\n'
-            'Составь ДЕТАЛЬНЫЙ план каждого слайда как массив объектов JSON.\n'
-            'Для каждого слайда укажи:\n'
-            '- name: имя файла (например, cover.page)\n'
-            '- title: краткий заголовок слайда\n'
-            '- role: одна из ролей: cover, content_with_icons, content_with_chart, conclusion, title_and_content\n'
-            '- bullets: список строк — основные пункты, которые нужно раскрыть на слайде\n'
-            '- icon_ideas: список строк — идей иконок (например, «щит», «карта»), которые подойдут к этому слайду\n'
-            '- chart_suggestion: если нужен график, укажи тип (bar/pie/line) и какие данные показать, иначе null\n'
-            'Также предложи тему (colors, textStyles) как раньше.\n'
-            'Формат ответа:\n'
-            '{\n'
-            '  "theme": { ... },\n'
-            '  "pages": [\n'
-            '    {\n'
-            '      "name": "cover.page",\n'
-            '      "title": "GeoIP Intelligence",\n'
-            '      "role": "cover",\n'
-            '      "bullets": ["Подзаголовок: R&D исследование"],\n'
-            '      "icon_ideas": ["щит"],\n'
-            '      "chart_suggestion": null\n'
-            '    },\n'
-            '    ...\n'
-            '  ]\n'
-            '}\n'
-            'Ответ ТОЛЬКО JSON, без дополнительного текста.'
-        )
-        resp = self.llm.chat([{"role": "system", "content": system},
-                              {"role": "user", "content": user}],
-                             temperature=0.3, max_tokens=1500)
-
-        json_str = resp.strip()
-        if json_str.startswith("```json"):
-            json_str = json_str[7:]
-        if json_str.endswith("```"):
-            json_str = json_str[:-3]
-        start_brace = json_str.find("{")
-        end_brace = json_str.rfind("}")
-        if start_brace != -1 and end_brace != -1:
-            json_str = json_str[start_brace:end_brace + 1]
-        else:
-            raise ValueError("Не удалось найти JSON в ответе планировщика")
-
-        try:
-            plan = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            print(f"Ошибка парсинга JSON плана: {e}\nОтвет модели:\n{resp}")
-            raise ValueError("План не является валидным JSON")
-
-        detailed_pages = plan.get("pages", [])
-        if len(detailed_pages) != slides_count:
-            if len(detailed_pages) < slides_count:
-                detailed_pages += [
-                    {"name": f"slide_{i}.page", "title": f"Слайд {i}",
-                     "role": "title_and_content", "bullets": [],
-                     "icon_ideas": [], "chart_suggestion": None}
-                    for i in range(len(detailed_pages), slides_count)
-                ]
-            else:
-                detailed_pages = detailed_pages[:slides_count]
-            plan["pages"] = detailed_pages
-
-        return plan
-
     def _extract_title(self, page: Dict) -> str:
         for el in page.get("elements", []):
             if el.get("elementType") == "text":
@@ -460,22 +598,18 @@ class OrchestratorAgent(PresentationAgent):
         page_path = pages_dir / page_name
         if not page_path.exists():
             raise FileNotFoundError(f"Страница {page_name} не найдена в проекте")
-
         pptd_files = list(project_dir.glob("*.pptd"))
         theme = {}
         if pptd_files:
             with open(pptd_files[0], "r", encoding="utf-8") as f:
                 pptd = yaml.safe_load(f)
                 theme = pptd.get("theme", {})
-
         with open(page_path, "r", encoding="utf-8") as f:
             current_yaml = f.read()
-
         role = LayoutTool.classify_role(page_name)
         gen = PageGenerator(self.llm, theme, self.icon_tool,
                             self.chart_tool, self.improver_tool)
         improved = gen.improve(page_name, current_yaml, instruction, role)
-
         with open(page_path, "w", encoding="utf-8") as f:
             yaml.dump(improved, f, allow_unicode=True)
         return improved
