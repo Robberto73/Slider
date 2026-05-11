@@ -1,4 +1,3 @@
-# agents/orchestrator.py
 import json
 import yaml
 import re
@@ -12,6 +11,7 @@ from tools.page_improver import PageImproverTool
 from tools.layout_tool import LayoutTool, SlideRole
 from tools.presentation_memory import PresentationMemory
 
+
 class OrchestratorAgent(PresentationAgent):
     def __init__(self, llm: BaseLLM, icons_dir: Path = None):
         self.llm = llm
@@ -19,6 +19,10 @@ class OrchestratorAgent(PresentationAgent):
         self.chart_tool = ChartTool(llm=self.llm)
         self.improver_tool = PageImproverTool(llm)
         self.memory = PresentationMemory()
+
+    # ═══════════════════════════════════════════════════════════
+    # ГЛАВНЫЙ МЕТОД ГЕНЕРАЦИИ
+    # ═══════════════════════════════════════════════════════════
 
     def generate(self, topic, slides_count, style, language,
                  include_charts, include_icons, output_dir, progress_callback=None):
@@ -57,17 +61,19 @@ class OrchestratorAgent(PresentationAgent):
                                    include_charts, include_icons, extra, role)
             pages_content[page_name] = content
 
-            # Запоминаем заголовок и иконки этого слайда
+            # Запоминаем заголовок и иконки
             title = self._extract_title(content)
             icons = self._extract_icons(content)
             self.memory.add_slide(page_name, title, icons)
 
-        # Адаптивное улучшение: проверяем качество всей презентации
+        # АДАПТИВНОЕ УЛУЧШЕНИЕ
         if progress_callback:
             progress_callback(85, "Анализ качества презентации…")
 
-        pages_content = self._auto_improve_presentation(pages_content, theme, topic, style, language,
-                                                        include_charts, include_icons)
+        pages_content = self._auto_improve_presentation(
+            pages_content, theme, topic, style, language,
+            include_charts, include_icons
+        )
 
         if progress_callback:
             progress_callback(90, "Сохранение проекта…")
@@ -76,6 +82,280 @@ class OrchestratorAgent(PresentationAgent):
         if progress_callback:
             progress_callback(95, "Конвертация в PPTX…")
         return {"status": "completed", "progress": 100}
+
+    # ═══════════════════════════════════════════════════════════
+    # РЕФЛЕКСИВНОЕ УЛУЧШЕНИЕ (полностью переработано)
+    # ═══════════════════════════════════════════════════════════
+
+    def _auto_improve_presentation(self, pages_content: Dict[str, Any], theme: Dict,
+                                   topic: str, style: str, language: str,
+                                   include_charts: bool, include_icons: bool) -> Dict[str, Any]:
+        """Проверяет качество и улучшает слайды с конкретной диагностикой."""
+        gen = PageGenerator(self.llm, theme, self.icon_tool, self.chart_tool)
+        improved_pages = dict(pages_content)
+
+        # Фаза 1: Быстрая оценка всех слайдов
+        scores = {}
+        issues_map = {}
+        for page_name, content in pages_content.items():
+            role = LayoutTool.classify_role(page_name)
+            score = gen._evaluate_page_fast(content, role)
+            scores[page_name] = score
+            issues_map[page_name] = self._diagnose_issues(content, role)
+
+        # Фаза 2: Определяем слайды для улучшения
+        low_quality = [
+            (name, content, scores[name], issues_map[name])
+            for name, content in pages_content.items()
+            if scores[name] < 6
+        ]
+
+        if not low_quality:
+            return improved_pages
+
+        # Фаза 3: Улучшение с конкретными инструкциями
+        max_improvements = max(1, len(pages_content) // 3)
+
+        for page_name, content, score, page_issues in low_quality[:max_improvements]:
+            role = LayoutTool.classify_role(page_name)
+
+            # Формируем конкретную инструкцию
+            fix_instructions = self._build_fix_prompt(page_issues, role)
+            memory_context = self.memory.get_context_for_next_slide()
+
+            extra = (
+                f"ИСПРАВЛЕНИЕ СЛАЙДА (текущая оценка: {score}/10).\n"
+                f"Конкретные проблемы:\n{fix_instructions}\n\n"
+                f"Контекст презентации:\n{memory_context}\n\n"
+                f"Тема: {topic}. Стиль: {style}. Язык: {language}."
+            )
+
+            # Генерируем исправленную версию
+            improved = gen.generate(
+                page_name, topic, style, language,
+                include_charts, include_icons, extra, role
+            )
+
+            # Фаза 4: Проверяем, стало ли лучше
+            new_score = gen._evaluate_page_fast(improved, role)
+            if new_score > score:
+                improved_pages[page_name] = improved
+                title = self._extract_title(improved)
+                icons = self._extract_icons(improved)
+                self.memory.add_slide(page_name, title, icons)
+            else:
+                # Fallback-шаблон, если LLM не справился
+                fallback = self._apply_fallback_template(role, theme, content)
+                fallback_score = gen._evaluate_page_fast(fallback, role)
+                if fallback_score > score:
+                    improved_pages[page_name] = fallback
+
+        return improved_pages
+
+    def _diagnose_issues(self, content: Dict, role: SlideRole) -> List[str]:
+        """Диагностирует конкретные проблемы слайда."""
+        issues = []
+        elements = content.get("elements", [])
+        texts = [e for e in elements if e.get("elementType") == "text"]
+
+        if not elements:
+            issues.append("Слайд полностью пуст — нет ни одного элемента")
+            return issues
+
+        if not texts:
+            issues.append("Нет текстовых элементов")
+        else:
+            empty_count = sum(
+                1 for t in texts
+                if not t.get("content", {}).get("text", "").strip()
+            )
+            if empty_count == len(texts):
+                issues.append("Все текстовые блоки пусты")
+            elif empty_count > 0:
+                issues.append(f"{empty_count} текстовых блоков пусты")
+
+        has_title = any(
+            t.get("content", {}).get("style", "") == "$title"
+            for t in texts
+        )
+        if not has_title and role != SlideRole.BLANK:
+            issues.append("Отсутствует заголовок слайда")
+
+        bg = content.get("background", {})
+        if bg.get("type") == "solid" and bg.get("color") == "$primary":
+            issues.append("Фон слайда чёрный — возможно, ошибка генерации")
+
+        # Проверка перекрытий
+        overlaps = self._count_overlaps(elements)
+        if overlaps > 0:
+            issues.append(f"{overlaps} пар элементов перекрываются")
+
+        return issues
+
+    def _count_overlaps(self, elements: List[Dict]) -> int:
+        count = 0
+        for i, e1 in enumerate(elements):
+            b1 = e1.get("bounds", [])
+            if len(b1) != 4:
+                continue
+            for e2 in elements[i + 1:]:
+                b2 = e2.get("bounds", [])
+                if len(b2) != 4:
+                    continue
+                if (b1[0] < b2[0] + b2[2] and b1[0] + b1[2] > b2[0] and
+                        b1[1] < b2[1] + b2[3] and b1[1] + b1[3] > b2[1]):
+                    count += 1
+        return count
+
+    def _build_fix_prompt(self, issues: List[str], role: SlideRole) -> str:
+        """Строит промпт для исправления на основе диагностики."""
+        fixes = []
+        for issue in issues:
+            if "пуст" in issue.lower():
+                fixes.append("- Добавь осмысленный контент во все текстовые блоки")
+            if "заголовок" in issue.lower():
+                fixes.append("- Добавь чёткий заголовок слайда (style: $title)")
+            if "чёрный" in issue.lower():
+                fixes.append("- Используй светлый фон (color: $bgLight) вместо чёрного")
+            if "перекрываются" in issue.lower():
+                fixes.append("- Разнеси элементы, чтобы не накладывались друг на друга")
+
+        role_fixes = {
+            SlideRole.COVER: "Это титульный слайд: нужен крупный заголовок и подзаголовок",
+            SlideRole.CONTENT_WITH_CHART: "Добавь реалистичные данные для графика",
+            SlideRole.CONCLUSION: "Добавь итоговые тезисы и призыв к действию",
+        }
+        if role in role_fixes:
+            fixes.append(f"- {role_fixes[role]}")
+
+        return "\n".join(fixes)
+
+    def _apply_fallback_template(self, role: SlideRole, theme: Dict,
+                                  original: Dict) -> Dict:
+        """Применяет гарантированный шаблон при провале LLM."""
+        colors = theme.get("colors", {})
+        bg = colors.get("bgLight", "$bgLight")
+        text = colors.get("textDark", "$textDark")
+        accent = colors.get("accent", "$accent")
+
+        # Извлекаем заголовок из оригинала, если есть
+        original_title = "Заголовок слайда"
+        for el in original.get("elements", []):
+            if el.get("elementType") == "text":
+                style = el.get("content", {}).get("style", "")
+                if "title" in style:
+                    original_title = el.get("content", {}).get("text", original_title)
+                    break
+
+        templates = {
+            SlideRole.COVER: {
+                "background": {"type": "solid", "color": bg},
+                "elements": [
+                    {
+                        "elementType": "text",
+                        "bounds": [200, 300, 1520, 200],
+                        "content": {
+                            "text": original_title,
+                            "style": "$title",
+                            "align": ["center", "middle"],
+                            "color": text
+                        }
+                    },
+                    {
+                        "elementType": "text",
+                        "bounds": [200, 520, 1520, 120],
+                        "content": {
+                            "text": "Подзаголовок презентации",
+                            "style": "$subtitle",
+                            "align": ["center", "middle"],
+                            "color": text
+                        }
+                    }
+                ]
+            },
+            SlideRole.TITLE_AND_CONTENT: {
+                "background": {"type": "solid", "color": bg},
+                "elements": [
+                    {
+                        "elementType": "text",
+                        "bounds": [120, 80, 1680, 120],
+                        "content": {
+                            "text": original_title,
+                            "style": "$title",
+                            "align": ["left", "middle"],
+                            "color": text
+                        }
+                    },
+                    {
+                        "elementType": "text",
+                        "bounds": [120, 240, 1680, 600],
+                        "content": {
+                            "text": "Основное содержание слайда. Добавьте ключевые тезисы и данные.",
+                            "style": "$body",
+                            "align": ["left", "top"],
+                            "color": text
+                        }
+                    }
+                ]
+            },
+            SlideRole.CONTENT_WITH_CHART: {
+                "background": {"type": "solid", "color": bg},
+                "elements": [
+                    {
+                        "elementType": "text",
+                        "bounds": [120, 80, 1680, 120],
+                        "content": {
+                            "text": original_title,
+                            "style": "$title",
+                            "align": ["left", "middle"],
+                            "color": text
+                        }
+                    },
+                    {
+                        "elementType": "chart",
+                        "bounds": [120, 240, 1200, 700],
+                        "type": "bar",
+                        "data": [
+                            {"категория": "Категория 1", "значение": 25},
+                            {"категория": "Категория 2", "значение": 40},
+                            {"категория": "Категория 3", "значение": 35},
+                        ],
+                        "colors": ["$accent", "$primary", "$textLight"]
+                    }
+                ]
+            },
+            SlideRole.CONCLUSION: {
+                "background": {"type": "solid", "color": bg},
+                "elements": [
+                    {
+                        "elementType": "text",
+                        "bounds": [200, 300, 1520, 200],
+                        "content": {
+                            "text": original_title,
+                            "style": "$title",
+                            "align": ["center", "middle"],
+                            "color": text
+                        }
+                    },
+                    {
+                        "elementType": "text",
+                        "bounds": [200, 520, 1520, 300],
+                        "content": {
+                            "text": "Итоговые выводы и рекомендации.",
+                            "style": "$body",
+                            "align": ["center", "top"],
+                            "color": text
+                        }
+                    }
+                ]
+            }
+        }
+
+        return templates.get(role, templates[SlideRole.TITLE_AND_CONTENT])
+
+    # ═══════════════════════════════════════════════════════════
+    # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
+    # ═══════════════════════════════════════════════════════════
 
     def _create_plan(self, topic, slides_count, style, language,
                      include_charts, include_icons):
@@ -103,7 +383,7 @@ class OrchestratorAgent(PresentationAgent):
             '      "title": "GeoIP Intelligence",\n'
             '      "role": "cover",\n'
             '      "bullets": ["Подзаголовок: R&D исследование"],\n'
-            '      "icon_ideas": ["шит"],\n'
+            '      "icon_ideas": ["щит"],\n'
             '      "chart_suggestion": null\n'
             '    },\n'
             '    ...\n'
@@ -112,8 +392,8 @@ class OrchestratorAgent(PresentationAgent):
             'Ответ ТОЛЬКО JSON, без дополнительного текста.'
         )
         resp = self.llm.chat([{"role": "system", "content": system},
-                               {"role": "user", "content": user}],
-                              temperature=0.3, max_tokens=1500)
+                              {"role": "user", "content": user}],
+                             temperature=0.3, max_tokens=1500)
 
         json_str = resp.strip()
         if json_str.startswith("```json"):
@@ -137,8 +417,9 @@ class OrchestratorAgent(PresentationAgent):
         if len(detailed_pages) != slides_count:
             if len(detailed_pages) < slides_count:
                 detailed_pages += [
-                    {"name": f"slide_{i}.page", "title": f"Слайд {i}", "role": "title_and_content",
-                     "bullets": [], "icon_ideas": [], "chart_suggestion": None}
+                    {"name": f"slide_{i}.page", "title": f"Слайд {i}",
+                     "role": "title_and_content", "bullets": [],
+                     "icon_ideas": [], "chart_suggestion": None}
                     for i in range(len(detailed_pages), slides_count)
                 ]
             else:
@@ -148,7 +429,6 @@ class OrchestratorAgent(PresentationAgent):
         return plan
 
     def _extract_title(self, page: Dict) -> str:
-        """Извлекает заголовок из сгенерированного слайда."""
         for el in page.get("elements", []):
             if el.get("elementType") == "text":
                 style = el.get("content", {}).get("style", "")
@@ -157,7 +437,6 @@ class OrchestratorAgent(PresentationAgent):
         return ""
 
     def _extract_icons(self, page: Dict) -> List[str]:
-        """Извлекает имена иконок из слайда."""
         icons = []
         for el in page.get("elements", []):
             if el.get("elementType") == "icon":
@@ -181,54 +460,22 @@ class OrchestratorAgent(PresentationAgent):
         page_path = pages_dir / page_name
         if not page_path.exists():
             raise FileNotFoundError(f"Страница {page_name} не найдена в проекте")
+
         pptd_files = list(project_dir.glob("*.pptd"))
         theme = {}
         if pptd_files:
             with open(pptd_files[0], "r", encoding="utf-8") as f:
                 pptd = yaml.safe_load(f)
                 theme = pptd.get("theme", {})
+
         with open(page_path, "r", encoding="utf-8") as f:
             current_yaml = f.read()
+
         role = LayoutTool.classify_role(page_name)
         gen = PageGenerator(self.llm, theme, self.icon_tool,
                             self.chart_tool, self.improver_tool)
         improved = gen.improve(page_name, current_yaml, instruction, role)
+
         with open(page_path, "w", encoding="utf-8") as f:
             yaml.dump(improved, f, allow_unicode=True)
         return improved
-
-    def _auto_improve_presentation(self, pages_content: Dict[str, Any], theme: Dict, topic: str, style: str,
-                                   language: str, include_charts: bool, include_icons: bool) -> Dict[str, Any]:
-        """Проверяет качество всей презентации и улучшает слайды с низкой оценкой."""
-        gen = PageGenerator(self.llm, theme, self.icon_tool, self.chart_tool)
-        low_quality_pages = []
-
-        # Оцениваем каждый слайд
-        for page_name, content in pages_content.items():
-            score = gen._evaluate_page(content, LayoutTool.classify_role(page_name))
-            if score < 7:  # Порог качества
-                low_quality_pages.append((page_name, content, score))
-
-        if not low_quality_pages:
-            return pages_content
-
-        # Улучшаем по одному слайду за раз, максимум 40% от общего числа
-        max_improvements = max(1, len(pages_content) // 3)
-        for page_name, content, score in low_quality_pages[:max_improvements]:
-            role = LayoutTool.classify_role(page_name)
-            memory_context = self.memory.get_context_for_next_slide()
-            extra = (
-                f"Улучши этот слайд. Его текущая оценка качества: {score}/10. "
-                f"Контекст презентации:\n{memory_context}\n"
-                f"Сделай его более наполненным, визуально привлекательным и соответствующим теме."
-            )
-            improved_content = gen.generate(page_name, topic, style, language,
-                                            include_charts, include_icons, extra, role)
-            pages_content[page_name] = improved_content
-
-            # Обновляем память о слайде
-            title = self._extract_title(improved_content)
-            icons = self._extract_icons(improved_content)
-            self.memory.add_slide(page_name, title, icons)
-
-        return pages_content
